@@ -23,8 +23,9 @@ from ..core.scheduler import ScheduledTask, Scheduler, ScheduleError, TaskStore,
 from ..memory.store import HistoryStore, default_db_path
 from ..providers import SEARCH_PROVIDERS
 from ..tools import build_registry, sysinfo
+from ..tools import clipboard as clipboard_mod
 from ..tools import notify as notify_mod
-from ..tools import web
+from ..tools import procman, web
 from .screens import ConfirmScreen, HelpScreen
 from .widgets import (
     AssistantMessage,
@@ -143,6 +144,10 @@ class JarvisApp(App[None]):
         self._stream_widget: AssistantMessage | None = None
         self._plan_view: PlanView | None = None
         self._busy = False
+        self._panel_busy = False
+        self._top_busy = False
+        self._panel_data: dict[str, str] | None = None
+        self._top_text = "(正在采集…)"
         self._last_flush = 0.0
         self._tool_count = 0
         self._turns_since_learn = 0
@@ -161,8 +166,13 @@ class JarvisApp(App[None]):
 
     def on_mount(self) -> None:
         self.theme = "textual-dark"
-        self._refresh_panel()
+        self._refresh_panel_now()
+        self._render_panel()
         self.set_interval(2.0, self._refresh_panel)
+        # Walking every process is much more expensive than the metrics above,
+        # so the TOP 进程 table refreshes on its own, slower clock.
+        self.set_interval(10.0, self._refresh_processes)
+        self._refresh_processes()
         if self.scheduler is not None:
             self.scheduler.on_error = self._on_schedule_error
             self.scheduler.start()
@@ -411,6 +421,10 @@ class JarvisApp(App[None]):
             await self.action_clear_chat()
         elif command == "/sys":
             self.run_sys_report()
+        elif command == "/clip":
+            await self._handle_clip_command(rest)
+        elif command == "/ps":
+            await self._handle_ps_command(rest)
         elif command == "/tools":
             lines = [
                 f"· {tool.name:<14} {'⚠ 需确认' if tool.dangerous else '免确认'}  {tool.description[:60]}"
@@ -850,6 +864,58 @@ class JarvisApp(App[None]):
                 Notice(f"沉淀了 {len(added)} 条长期记忆：\n" + "\n".join(f"+ {f}" for f in added), "info")
             )
 
+    # ------------------------------------------------- clipboard / processes
+    async def _handle_clip_command(self, rest: str) -> None:
+        """``/clip`` 看剪贴板，``/clip set <文本>`` 写入，``/clip clear`` 清空。"""
+
+        parts = rest.split(maxsplit=1)
+        action = parts[0].lower() if parts else ""
+        payload = parts[1] if len(parts) > 1 else ""
+
+        if action in {"", "show", "get"}:
+            try:
+                text = await asyncio.to_thread(clipboard_mod.read_clipboard, 4000)
+            except Exception as exc:  # noqa: BLE001 - surface the reason in the UI
+                await self._append(Notice(f"读剪贴板失败：{exc}", "bad"))
+                return
+            await self._append(Notice("剪贴板\n" + text, "info"))
+        elif action in {"set", "put", "copy"}:
+            if not payload:
+                await self._append(Notice("用法：/clip set <要复制的文本>", "warn"))
+                return
+            try:
+                result = await asyncio.to_thread(clipboard_mod.write_clipboard, payload)
+            except Exception as exc:  # noqa: BLE001
+                await self._append(Notice(f"写剪贴板失败：{exc}", "bad"))
+                return
+            await self._append(Notice(result, "info"))
+        elif action in {"clear", "empty", "wipe"}:
+            try:
+                result = await asyncio.to_thread(clipboard_mod.clear_clipboard)
+            except Exception as exc:  # noqa: BLE001
+                await self._append(Notice(f"清空剪贴板失败：{exc}", "bad"))
+                return
+            await self._append(Notice(result, "info"))
+        else:
+            await self._append(
+                Notice("用法：/clip（查看）· /clip set <文本>（写入）· /clip clear（清空）", "warn")
+            )
+
+    async def _handle_ps_command(self, rest: str) -> None:
+        """``/ps [cpu|mem|name|pid] [关键词]`` —— 只读的进程列表。"""
+
+        tokens = rest.split()
+        sort_by = "cpu"
+        if tokens and tokens[0].lower() in {"cpu", "mem", "memory", "name", "pid"}:
+            sort_by = tokens.pop(0).lower()
+        needle = " ".join(tokens)
+        try:
+            report = await asyncio.to_thread(procman.list_processes, sort_by, 15, needle)
+        except Exception as exc:  # noqa: BLE001
+            await self._append(Notice(f"列进程失败：{exc}", "bad"))
+            return
+        await self._append(Notice(report, "info"))
+
     # ------------------------------------------------------------------- tasks
     async def _handle_task_command(self, rest: str) -> None:
         parts = rest.split(maxsplit=1)
@@ -1055,14 +1121,66 @@ class JarvisApp(App[None]):
         chat.scroll_end(animate=False)
 
     def _refresh_panel(self) -> None:
+        """Timer tick: sample the cheap system metrics off the UI thread.
+
+        Walking every process with psutil costs seconds on a busy machine, so
+        the process table has its own slower timer (:meth:`_refresh_processes`).
+        Both run in worker threads: a slow sample can never freeze the window.
+        """
+
+        if self._panel_busy:
+            return
+        self._panel_busy = True
+        self.run_worker(self._refresh_panel_async(), group="panel", exclusive=True)
+
+    def _refresh_panel_now(self) -> None:
+        """Synchronous first paint (before the app is interactive)."""
+
         try:
-            data = sysinfo.snapshot(include_processes=5)
+            data = sysinfo.snapshot(include_processes=0)
         except Exception:  # noqa: BLE001 - panel is cosmetic, never crash the UI
+            return
+        self._panel_data = data
+
+    async def _refresh_panel_async(self) -> None:
+        try:
+            data = await asyncio.to_thread(sysinfo.snapshot, 0)
+        except Exception:  # noqa: BLE001 - panel is cosmetic, never crash the UI
+            return
+        finally:
+            self._panel_busy = False
+        self._panel_data = data
+        self._render_panel()
+
+    def _refresh_processes(self) -> None:
+        """Timer tick: refresh the (expensive) TOP 进程 table."""
+
+        if self._top_busy:
+            return
+        self._top_busy = True
+        self.run_worker(self._refresh_processes_async(), group="top", exclusive=True)
+
+    async def _refresh_processes_async(self) -> None:
+        try:
+            text = await asyncio.to_thread(sysinfo.top_processes, 5)
+        except Exception:  # noqa: BLE001 - panel is cosmetic, never crash the UI
+            return
+        finally:
+            self._top_busy = False
+        self._top_text = text
+        self._render_panel()
+
+    def _render_panel(self) -> None:
+        data = self._panel_data
+        if not data:
             return
         model = self.agent.model
         tasks = self.task_store.list()
         next_task = min((t for t in tasks if t.enabled and t.next_run), key=lambda t: t.next_run, default=None)
-        panel = self.query_one("#syspanel", Static)
+        try:
+            panel = self.query_one("#syspanel", Static)
+        except Exception:  # noqa: BLE001 - widget may already be gone
+            return
         panel.update(
             "\n".join(
                 [
@@ -1080,7 +1198,7 @@ class JarvisApp(App[None]):
                     data["disks"],
                     "",
                     "TOP 进程",
-                    data["top"],
+                    self._top_text,
                     "",
                     "SESSION",
                     f"模型   {model.display} · {model.model}",
@@ -1130,6 +1248,11 @@ def _selftest(ping: bool = False) -> int:
 
     print("--- sysinfo ---")
     print(sysinfo.sys_report(include_processes=3))
+    print("--- clipboard ---")
+    preview = clipboard_mod.clipboard_text(80)
+    print(f"text        : {preview or '(剪贴板没有文本)'}")
+    print("--- processes ---")
+    print(procman.list_processes(sort_by="cpu", limit=3))
     print("--- fs ---")
     print(fs.list_dir(str(config.workdir))[:400])
 

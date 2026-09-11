@@ -6,7 +6,7 @@ from functools import partial
 
 from ..config import SearchConfig, SecurityConfig
 from ..core.registry import Tool, ToolRegistry
-from . import fs, shell, sysinfo, web
+from . import clipboard, fs, procman, shell, sysinfo, web
 
 
 def build_registry(
@@ -165,6 +165,135 @@ def build_registry(
                 "required": ["url"],
             },
             func=web.fetch,
+        )
+    )
+
+    # ------------------------------------------------------------ clipboard
+    registry.register(
+        Tool(
+            name="read_clipboard",
+            description=(
+                "读取当前系统剪贴板的文本内容（同时会报告格式，以及用资源管理器「复制文件」"
+                "得到的文件列表）。用户说「看看我复制了什么」「总结一下剪贴板里的内容」时用它。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "max_chars": {"type": "integer", "description": "最多返回字符数，默认 8000"},
+                },
+            },
+            func=clipboard.read_clipboard,
+        )
+    )
+    registry.register(
+        Tool(
+            name="write_clipboard",
+            description=(
+                "把一段文本放进系统剪贴板，之后用户可以直接 Ctrl+V 粘贴。"
+                "会覆盖剪贴板原有的内容（除非 append=true）。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "要复制的文本；传空字符串表示清空剪贴板"},
+                    "append": {"type": "boolean", "description": "true 表示追加到剪贴板现有文本后面"},
+                },
+                "required": ["text"],
+            },
+            func=clipboard.write_clipboard,
+            dangerous=True,
+            hint="将覆盖系统剪贴板内容",
+        )
+    )
+    registry.register(
+        Tool(
+            name="clear_clipboard",
+            description="清空系统剪贴板（里面可能是文本、图片或文件列表）。",
+            parameters={"type": "object", "properties": {}},
+            func=clipboard.clear_clipboard,
+            dangerous=True,
+            hint="将清空系统剪贴板内容",
+        )
+    )
+
+    # ------------------------------------------------------------- processes
+    registry.register(
+        Tool(
+            name="list_processes",
+            description=(
+                "列出正在运行的进程（PID、名称、CPU%、内存、状态、用户），类似任务管理器。"
+                "想看某个程序占多少资源、或要结束进程前先拿 PID，就用它。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "sort_by": {
+                        "type": "string",
+                        "description": "排序字段：cpu（默认）/ memory / name / pid",
+                    },
+                    "limit": {"type": "integer", "description": "返回条数，默认 25，最多 200"},
+                    "name_contains": {"type": "string", "description": "只看名称包含该文本的进程，例如 chrome"},
+                },
+            },
+            func=procman.list_processes,
+        )
+    )
+    registry.register(
+        Tool(
+            name="process_info",
+            description=(
+                "查看某个进程的详细信息：命令行、可执行路径、父进程与子进程、网络连接、"
+                "启动时间、CPU/内存占用。参数可以是 PID 或进程名。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "PID（如 1234）或进程名（如 chrome）"},
+                },
+                "required": ["query"],
+            },
+            func=procman.process_info,
+        )
+    )
+    registry.register(
+        Tool(
+            name="kill_process",
+            description=(
+                "结束一个进程（先温和终止，无效时可 force=true 强制结束）。"
+                "需要 PID，先调用 list_processes 拿到。系统关键进程与 JARVIS 自身会被拒绝。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "pid": {"type": "integer", "description": "目标进程 PID"},
+                    "force": {"type": "boolean", "description": "true 表示温和终止无效时强制结束"},
+                    "timeout": {"type": "number", "description": "等待退出的秒数，默认 3"},
+                },
+                "required": ["pid"],
+            },
+            func=procman.kill_process,
+            dangerous=True,
+            hint="将结束一个正在运行的进程（未保存的数据可能丢失）",
+        )
+    )
+    registry.register(
+        Tool(
+            name="freeze_process",
+            description=(
+                "挂起（冻结）一个进程以释放 CPU，或把它恢复回来。"
+                "适合临时压住吃 CPU 的程序而不丢它的状态；resume=true 表示恢复。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "pid": {"type": "integer", "description": "目标进程 PID"},
+                    "resume": {"type": "boolean", "description": "true 表示恢复挂起的进程"},
+                },
+                "required": ["pid"],
+            },
+            func=procman.freeze_process,
+            dangerous=True,
+            hint="将挂起/恢复一个正在运行的进程",
         )
     )
 

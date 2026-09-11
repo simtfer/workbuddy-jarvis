@@ -17,7 +17,9 @@ from jarvis.tui.app import JarvisApp
 from jarvis.tui.screens import ConfirmScreen
 
 # Dump every thread's stack if the test wedges, so a hang is never a mystery.
-faulthandler.dump_traceback_later(60, exit=True)
+# The budget is generous because each command waits for the app to look idle,
+# and the sidebar's psutil sampling keeps a worker thread busy on a slow box.
+faulthandler.dump_traceback_later(240, exit=True)
 
 FAILURES: list[str] = []
 
@@ -62,6 +64,28 @@ async def main() -> int:
             check("/tools 有输出", len(chat.children) >= 2)
             check("网络搜索工具已注册", app.registry.get("web_search") is not None)
             check("网页抓取工具已注册", app.registry.get("fetch_url") is not None)
+            check("剪贴板工具已注册", app.registry.get("read_clipboard") is not None)
+            check("进程工具已注册", app.registry.get("list_processes") is not None)
+            check("进程工具共 4 个",
+                  {"list_processes", "process_info", "kill_process", "freeze_process"}
+                  <= {t.name for t in app.registry.tools})
+
+            # ------------------------------------------------- clipboard / process
+            await type_command(pilot, "/ps")
+            last = str(chat.children[-1].content)
+            check("/ps 输出进程表", "PID" in last, last.splitlines()[0][:50])
+
+            await type_command(pilot, "/ps mem python")
+            last = str(chat.children[-1].content)
+            check("/ps 支持排序与过滤", "PID" in last, last.splitlines()[0][:50])
+
+            await type_command(pilot, "/clip")
+            last = str(chat.children[-1].content)
+            check("/clip 有输出", "剪贴板" in last, last.splitlines()[0][:50])
+
+            await type_command(pilot, "/clip 乱七八糟")
+            last = str(chat.children[-1].content)
+            check("/clip 未知子命令给用法", "用法" in last, last.splitlines()[0][:50])
 
             # ------------------------------------------------- model & provider
             await type_command(pilot, "/model")

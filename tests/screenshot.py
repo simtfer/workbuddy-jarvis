@@ -52,10 +52,21 @@ ANSWER = """\
 **跟你的关系**：第 3 条那篇评测直接对标你在做的工具链对比；\
 第 4 条如果落地，本地跑 Ollama 的体验会明显变好。要我把这篇评测的正文抓下来细看吗？"""
 
+FOLLOW_UP = "那顺便看看现在谁在吃 CPU"
+PROCESSES = """\
+共 381 个进程，按 cpu 排序，显示前 5 个。
+    PID  名称                             CPU%          内存  状态          用户
+-------------------------------------------------------------------------
+      0  System Idle Process            87.7       8.0 KB  running      SYSTEM
+  31644  python.exe                      4.8     115.0 MB  running      dingy
+  21700  python.exe                      4.5      66.7 MB  running      dingy
+  18096  FlClash.exe                     1.7     450.4 MB  running      dingy
+   3928  MemCompression                  0.1       1.7 GB  running      SYSTEM"""
+
 
 async def main() -> None:
     app = JarvisApp(load_config())
-    async with app.run_test(size=(132, 40)) as pilot:
+    async with app.run_test(size=(132, 44)) as pilot:
         await pilot.pause()
 
         await app._append(UserMessage(QUERY))
@@ -67,6 +78,10 @@ async def main() -> None:
 
         await app._append(Notice("▶ 模型  qwen  ·  deepseek 请求失败（429 额度用尽），已自动切换", "warn"))
         await app._append(Notice("· 本次调用 1 个工具，用时 4.1s", "info"))
+
+        await app._append(UserMessage(FOLLOW_UP))
+        await app._append(ToolCallView("list_processes", 'sort_by="cpu", limit=5'))
+        await app._append(ToolResultView("list_processes", PROCESSES, True))
 
         await pilot.pause()
         OUT.parent.mkdir(parents=True, exist_ok=True)

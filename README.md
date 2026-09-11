@@ -1,10 +1,11 @@
 # JARVIS-Win
 
-一个常驻 Windows 的 AI 助手，带终端 TUI。能对话，也能真的干活：执行命令、读写文件、体检系统、记住你的偏好、按计划多步执行、准点自动跑任务、上网查资料。
+一个常驻 Windows 的 AI 助手，带终端 TUI。能对话，也能真的干活：执行命令、读写文件、体检系统、看/改剪贴板、管理进程、记住你的偏好、按计划多步执行、准点自动跑任务、上网查资料。
 
 - **Phase 1**：Textual TUI + 可插拔 OpenAI 兼容模型 + 工具调用循环 + 破坏性操作确认 + 会话历史落库
 - **Phase 2**：长期记忆、计划模式（可执行的多步任务）、定时任务、全局热键常驻守护
 - **Phase 3**：自定义 provider（含内网/自建端点）、多模型热切换与故障自动切换、联网搜索与网页抓取、系统托盘图标
+- **Phase 4**：剪贴板读写（纯 ctypes，零依赖）、进程管理（列表 / 详情 / 结束 / 挂起恢复）；顺带修掉了 psutil 并发与系统面板卡界面的隐患
 
 ## 快速开始
 
@@ -35,6 +36,8 @@ api_key = "sk-..."      # 或者留空，改设环境变量 DEEPSEEK_API_KEY
 | `/help` | 帮助面板 |
 | `/tools` | 列出工具及其确认策略 |
 | `/sys` | 立刻输出系统体检报告 |
+| `/clip` | 查看剪贴板（`/clip set <文本>` 写入 · `/clip clear` 清空） |
+| `/ps` | 进程列表（`/ps mem` 按内存 · `/ps chrome` 按名字过滤） |
 | `/history` · `/resume <id>` | 最近会话列表 · 载入某个历史会话作为上下文 |
 | `/reset` · `/clear` · `/theme` · `/quit` | 清空上下文 · 清屏 · 切主题 · 退出 |
 
@@ -73,6 +76,34 @@ api_key = "sk-..."      # 或者留空，改设环境变量 DEEPSEEK_API_KEY
 
 也可以直接说「搜一下 xxx」，模型会自己调 `web_search` 工具；需要细节时它还会追加 `fetch_url` 读正文。
 免 Key 的 DuckDuckGo 后端默认可用，搜索与抓取都走标准库，没有新增依赖。
+
+### 剪贴板
+
+```text
+/clip                      看看现在剪贴板里有什么（文本 / 文件列表 / 格式）
+/clip set <文本>           把这段文本放进剪贴板，之后直接 Ctrl+V
+/clip clear                清空剪贴板
+```
+
+对话里同样好使：「总结一下我复制的内容」「把刚才的结论复制到剪贴板」「我在资源管理器里复制了哪些文件」。
+直接用 Win32 剪贴板 API（ctypes，无新增依赖），也能识别「复制文件」产生的 `CF_HDROP` 文件列表。
+读取免确认；**写入和清空会覆盖你剪贴板里的东西，所以每次都会弹窗确认**。
+剪贴板同一时刻只能被一个程序打开，遇到别的程序（截图工具、剪贴板管理器、聊天软件）占用时会自动重试，
+仍失败则明确告诉你原因，而不是静默失败。
+
+### 进程管理
+
+```text
+/ps                        占用 CPU 最高的 15 个进程
+/ps mem                    按内存排序；/ps chrome 只看名字含 chrome 的
+```
+
+对话里：「谁在吃 CPU」「Chrome 开了几个进程、占多少内存」「把那个卡住的进程关掉」「先把它冻住别占 CPU」。
+四个工具：`list_processes`（列表）、`process_info`（详情：命令行 / 父子进程 / 网络连接 / 启动时间）、
+`kill_process`（结束，温和失败可 `force`）、`freeze_process`（挂起 / 恢复）。
+**结束和挂起都会弹窗确认**，并且有一层硬拦截：`System` / `smss` / `csrss` / `lsass` / `services` / `winlogon`
+等系统关键进程，以及 JARVIS 自己所在的进程链，一律拒绝——不依赖模型自觉。
+列表里的 CPU% 已按逻辑核数归一化，和任务管理器口径一致。
 
 ### 长期记忆
 
@@ -143,7 +174,7 @@ TUI (Textual)  →  Agent 内核  →  工具层  →  LLM 适配 / 记忆
 - `src/jarvis/llm/` — 仅依赖 OpenAI 兼容协议；端点不支持 tools 时自动降级为纯对话
 - `src/jarvis/providers.py` — 内置 provider / 搜索后端预设目录 + base_url 反查
 - `src/jarvis/tomlwrite.py` — 最小 TOML 序列化（配置可写回）
-- `src/jarvis/tools/` — `shell`（命令执行 + 黑名单护栏）、`fs`（读写/列目录/搜索）、`sysinfo`（psutil 快照）、`web`（搜索 + 正文抓取）、`notify`（Windows 通知）
+- `src/jarvis/tools/` — `shell`（命令执行 + 黑名单护栏）、`fs`（读写/列目录/搜索）、`sysinfo`（psutil 快照 + 采样串行化）、`clipboard`（ctypes 剪贴板）、`procman`（进程管理）、`web`（搜索 + 正文抓取）、`notify`（Windows 通知）
 - `src/jarvis/memory/` — SQLite：会话历史 + 长期事实
 - `src/jarvis/daemon/` — `hotkey.py`（RegisterHotKey 全局热键）、`tray.py`（通知区图标 + 右键菜单）、`service.py`（守护进程、无人值守任务执行）
 
@@ -158,9 +189,17 @@ TUI (Textual)  →  Agent 内核  →  工具层  →  LLM 适配 / 记忆
 | `sys_report` | CPU / 内存 / 磁盘 / 网络 / 电池 / 高占用进程 | 免确认 |
 | `web_search` | 联网搜索（默认 DuckDuckGo，免 Key） | 免确认 |
 | `fetch_url` | 抓取网页并提取正文 | 免确认 |
+| `read_clipboard` | 读剪贴板文本（附带格式与文件列表） | 免确认 |
+| `write_clipboard` | 写入 / 追加剪贴板（`text=""` 等于清空） | ⚠ 需要 |
+| `clear_clipboard` | 清空剪贴板 | ⚠ 需要 |
+| `list_processes` | 进程列表（PID / CPU% / 内存 / 状态 / 用户） | 免确认 |
+| `process_info` | 单个进程详情（命令行、父子进程、端口…） | 免确认 |
+| `kill_process` | 结束进程（可 `force` 强杀） | ⚠ 需要 |
+| `freeze_process` | 挂起 / 恢复进程 | ⚠ 需要 |
 
 - 危险工具在 TUI 里弹窗确认，可选「同意 / 拒绝 / 本会话始终允许」。
 - `run_shell` 内置硬拦截：格式化磁盘、`del /s`、`rm -rf /`、`reg delete`、`bcdedit`、`diskpart`、`vssadmin delete`、关机等一律拒绝执行。
+- `kill_process` / `freeze_process` 另有硬拦截：`System` / `Idle` / `smss` / `csrss` / `wininit` / `services` / `lsass` / `winlogon` / `fontdrvhost` 等关键进程，以及 JARVIS 自身与其祖先进程链，无论怎么要求都拒绝。
 - 定时任务默认**拒绝**危险操作，除非创建时加了 `--danger`（守护进程与 TUI 行为一致）。
 - 确认框 5 分钟无响应自动按拒绝处理，不会把 Agent 卡死。
 - API Key 只在 `config.toml` 或环境变量里，`config.toml` 与 `data/` 都在 .gitignore 中。
@@ -171,6 +210,7 @@ TUI (Textual)  →  Agent 内核  →  工具层  →  LLM 适配 / 记忆
 ```bash
 uv run python -u tests/phase2.py        # 计划/记忆/调度/热键（无网络，含真实热键注册）
 uv run python -u tests/phase3.py        # provider 目录/配置读写/热切换/搜索解析/托盘结构（无网络）
+uv run python -u tests/phase4.py        # 剪贴板往返（自动备份还原）+ 进程列表/详情/护栏/真实杀进程（无网络）
 uv run python -u tests/smoke_tui.py     # 无头 TUI：命令、模型切换、provider 增删、任务、计划面板、弹窗
 uv run python -u tests/daemon_check.py  # 守护进程：真实启动 + 热键注册 + 真实按键触发 + pid 防重
 uv run python -u tests/tray_check.py    # 真实托盘：加入通知区、点击回调、气泡通知、任务栏重启后重挂
@@ -180,8 +220,9 @@ uv run python -u tests/live_phase3.py   # 真实联网搜索 + 真实网页抓�
 uv run python -u tests/screenshot.py    # 导出 docs/screenshot.svg 界面快照
 ```
 
-离线测试（phase2 / phase3 / smoke_tui）不需要网络也不需要 API Key，全程用临时数据库与临时配置，
-不会动你的 `data/` 和 `config.toml`。
+离线测试（phase2 / phase3 / phase4 / smoke_tui）不需要网络也不需要 API Key，全程用临时数据库与临时配置，
+不会动你的 `data/` 和 `config.toml`。`phase4.py` 会临时用一下系统剪贴板，但会先备份原内容并在结束时还原
+（若剪贴板里有图片或文件列表这类无法还原的内容，则自动跳过写入测试）。
 
 ## 已知问题
 
@@ -189,7 +230,12 @@ uv run python -u tests/screenshot.py    # 导出 docs/screenshot.svg 界面快�
 - `ollama` 段默认指向本机 11434；未装 Ollama 时切换过去会报连接失败（会自动切到别的可用模型，如果配了 fallback）。
 - 计划模式与记忆提炼都会额外消耗模型调用：`learn_every` 调大可以省钱，`auto_learn=false` 可完全关掉。
 - 联网搜索依赖本机能出网。走代理时按系统 `HTTPS_PROXY` 环境变量；DuckDuckGo 偶发限流会返回空结果并提示换后端。
+- 剪贴板是「同一时刻只能被一个程序打开」的系统资源：截图工具 / 剪贴板管理器 / 聊天软件占用时读写会失败，
+  JARVIS 会重试约 1 秒再报明确错误；稍等重试即可。
+- Windows 上遍历进程比想象中贵（这台机器约 380 个进程，取一次 CPU+内存要 1–2 秒，`status` 字段单项就要 1.7 秒）。
+  因此：进程列表只对**要显示的几行**取昂贵字段；侧栏的 CPU/内存/磁盘每 2 秒刷新、进程表每 10 秒刷新，
+  且都在后台线程里采样；`psutil` 的采样被一把全局锁串行化（psutil 的 Windows 扩展在多线程同时枚举时会互相卡死）。
 
 ## 路线图
 
-- Phase 4：语音（faster-whisper STT + edge-tts TTS）—— 按你的要求暂缓
+- Phase 5：语音（faster-whisper STT + edge-tts TTS）—— 按你的要求暂缓

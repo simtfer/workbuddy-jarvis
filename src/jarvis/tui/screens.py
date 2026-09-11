@@ -79,11 +79,20 @@ class HelpScreen(ModalScreen[None]):
     """
 
     HELP_TEXT = """\
-JARVIS-Win · Phase 3
+JARVIS-Win · Phase 4
 
 对话
   直接输入问题，回车发送。JARVIS 会自行决定是否调用工具。
   Esc 中断正在生成的回答。
+
+剪贴板与进程
+  /clip                      看看现在剪贴板里有什么（文本/文件列表/格式）
+  /clip set <文本>           把这段文本放进剪贴板，之后直接 Ctrl+V
+  /clip clear                清空剪贴板
+  /ps                        占用 CPU 最高的 15 个进程
+  /ps mem                    按内存排序；/ps chrome 只看名字含 chrome 的
+  也可以用说的：「总结一下我复制的内容」「关掉占用最高的那个进程」
+  —— 读写剪贴板、结束/挂起进程都会弹窗确认；系统关键进程会被拒绝。
 
 模型与 Provider
   /model                     列出模型（带序号 / provider / Key 状态）
