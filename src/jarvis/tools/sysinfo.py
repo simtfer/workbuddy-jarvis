@@ -8,11 +8,21 @@ import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta
-from typing import Iterator
+from typing import Any, Iterator
 
 import psutil
 
 from ..core.registry import ToolError
+from ..textwidth import clip, pad
+
+# Usable width of the TUI sidebar in cells. ``#side`` is 46 wide, minus 1 cell of
+# horizontal padding on each side and a 1-cell left border -> 43. Anything this
+# module hands to the panel is clipped to it, because a line one cell too long
+# wraps and turns the sidebar into the ragged mess it is supposed to avoid.
+PANEL_WIDTH = 43
+
+# Width reserved for a process name in the TOP 进程 table.
+NAME_COL = 20
 
 # psutil's Windows extension is NOT safe under concurrency: when two threads
 # call ``process_iter(attrs)`` at the same time they both block forever inside
@@ -49,7 +59,33 @@ def _bytes(value: float) -> str:
     return f"{value:.1f} TB"
 
 
-def snapshot(include_processes: int = 8) -> dict[str, str]:
+def _count(value: int) -> str:
+    """1234567 -> ``1.2M``: keeps the packet counters inside the sidebar."""
+
+    for suffix, scale in (("B", 1_000_000_000), ("M", 1_000_000), ("K", 1_000)):
+        if value >= scale:
+            return f"{value / scale:.1f}{suffix}"
+    return str(value)
+
+
+def core_rows(cores: list[int], per_row: int = 8, indent: int = 0) -> list[str]:
+    """Per-core CPU percentages as fixed-width rows.
+
+    Every cell is three characters wide, so the rows keep their shape whether a
+    core reads ``0`` or ``100`` - a live panel that reflows looks broken even
+    when the numbers are right.
+    """
+
+    if not cores:
+        return [" " * indent + "(未知)"]
+    cells = [f"{value:>3d}" for value in cores]
+    return [
+        " " * indent + " ".join(cells[start : start + per_row])
+        for start in range(0, len(cells), per_row)
+    ]
+
+
+def snapshot(include_processes: int = 8) -> dict[str, Any]:
     """Collect a live snapshot of the machine (used by the TUI panel).
 
     ``include_processes=0`` skips the process table entirely: that part costs
@@ -61,11 +97,11 @@ def snapshot(include_processes: int = 8) -> dict[str, str]:
         return _snapshot_locked(include_processes)
 
 
-def top_processes(limit: int = 8) -> str:
+def top_processes(limit: int = 8, width: int = PANEL_WIDTH) -> str:
     """Rows of the busiest processes, highest CPU first (expensive: seconds)."""
 
     with psutil_guard():
-        return _top_processes_locked(limit)
+        return _top_processes_locked(limit, width)
 
 
 # ``cpu_percent`` reports the delta since the previous call, so the counters are
@@ -111,8 +147,12 @@ def _slow_values() -> tuple[Any, list[Any], datetime, str]:
     return swap, disks, boot, uptime
 
 
-def _top_processes_locked(limit: int) -> str:
-    """Busiest processes by CPU, memory fetched only for the rows we print."""
+def _top_processes_locked(limit: int, width: int = PANEL_WIDTH) -> str:
+    """Busiest processes by CPU as a fixed-width table that fits the sidebar.
+
+    Memory is fetched only for the rows we actually print, and every column has
+    a fixed width so the table does not jitter as the numbers change.
+    """
 
     procs: list[psutil.Process] = []
     for proc in psutil.process_iter(["pid", "name"]):
@@ -140,18 +180,18 @@ def _top_processes_locked(limit: int) -> str:
             continue
 
     ranked.sort(key=lambda item: item[0], reverse=True)
-    lines: list[str] = []
+    lines: list[str] = [clip(f"  {pad('名称', NAME_COL)} {'CPU%':>6} {'MEM':>8}", width)]
     for cpu, proc in ranked[:limit]:
         try:
             rss = proc.memory_info().rss
         except _SKIP:
             rss = 0
-        name = proc.info.get("name") or "(未知)"
-        lines.append(f"  {name[:28]:<28} CPU {cpu:>5.1f}%  MEM {_bytes(rss)}")
+        name = pad(clip(proc.info.get("name") or "(未知)", NAME_COL), NAME_COL)
+        lines.append(clip(f"  {name} {cpu:>5.1f}% {_bytes(rss):>8}", width))
     return "\n".join(lines) or "  (无)"
 
 
-def _snapshot_locked(include_processes: int) -> dict[str, str]:
+def _snapshot_locked(include_processes: int) -> dict[str, Any]:
     # interval=None never blocks: usage is measured since the previous call,
     # which is exactly what a refresh-every-2s panel wants.
     cpu_percent = psutil.cpu_percent(interval=None)
@@ -174,14 +214,18 @@ def _snapshot_locked(include_processes: int) -> dict[str, str]:
     return {
         "host": f"{socket.gethostname()} · {platform.system()} {platform.release()}",
         "cpu": f"{cpu_percent:.1f}% · {psutil.cpu_count(logical=True)} 逻辑核",
-        "per_cpu": " ".join(f"{v:.0f}%" for v in per_cpu),
+        "cores": [round(v) for v in per_cpu],
         "memory": f"{memory.percent:.1f}% · {_bytes(memory.used)} / {_bytes(memory.total)}",
         "swap": f"{swap.percent:.1f}% · {_bytes(swap.used)} / {_bytes(swap.total)}",
         "boot": f"{boot:%Y-%m-%d %H:%M} · 已运行 {uptime}",
         "battery": battery_text,
-        "net": f"↓{_bytes(net.bytes_recv)} ↑{_bytes(net.bytes_sent)} · 包 {net.packets_recv:,}/{net.packets_sent:,}",
+        "net": f"↓{_bytes(net.bytes_recv)} ↑{_bytes(net.bytes_sent)} "
+        f"· 包 {_count(net.packets_recv)}/{_count(net.packets_sent)}",
         "disks": "\n".join(
-            f"  {device}: {usage.percent:.0f}% 已用 · {_bytes(usage.free)} 可用 / {_bytes(usage.total)}"
+            clip(
+                f"  {device}: {usage.percent:.0f}% 已用 · {_bytes(usage.free)} 可用 / {_bytes(usage.total)}",
+                PANEL_WIDTH,
+            )
             for device, usage in disks
         ) or "  (无)",
         "top": top,
@@ -196,9 +240,10 @@ def sys_report(include_processes: int = 8) -> str:
     """
 
     data = snapshot(include_processes)
+    per_core = " ".join(f"{value}%" for value in data["cores"])
     return (
         f"主机: {data['host']}\n"
-        f"CPU: {data['cpu']}  ({data['per_cpu']})\n"
+        f"CPU: {data['cpu']}  ({per_core})\n"
         f"内存: {data['memory']}\n"
         f"交换: {data['swap']}\n"
         f"启动: {data['boot']}\n"

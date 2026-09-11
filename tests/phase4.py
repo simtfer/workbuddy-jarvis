@@ -19,7 +19,7 @@ import psutil
 
 from jarvis.config import SearchConfig, SecurityConfig
 from jarvis.core.registry import ToolError
-from jarvis.tools import build_registry, clipboard, procman
+from jarvis.tools import build_registry, clipboard, procman, sysinfo
 
 faulthandler.dump_traceback_later(180, exit=True)
 
@@ -98,7 +98,9 @@ def test_clipboard_registry() -> None:
     out = asyncio.run(registry.call("read_clipboard", '{"max_chars": 50}'))
     check("read_clipboard 调用不炸", "Traceback" not in out and bool(out), out.splitlines()[0][:60])
     out = asyncio.run(registry.call("write_clipboard", '{"text": 1}'))
-    check("错类型参数被转成可读错误", out.startswith("[错误]"), out[:60])
+    check("错类型参数被转成可读错误", "字符串" in out, out.splitlines()[0][:70])
+    out = asyncio.run(registry.call("read_clipboard", '{"max_chars": "很多"}'))
+    check("max_chars 类型错误可读", "整数" in out, out.splitlines()[0][:70])
     out = asyncio.run(registry.call("read_clipboard", "not-json"))
     check("坏 JSON 参数被转成可读错误", out.startswith("[错误]"), out[:60])
     out = asyncio.run(registry.call("clear_clipboard", "{}"))
@@ -302,6 +304,65 @@ def test_tui_hooks() -> None:
     check("帮助里有进程说明", "/ps" in HelpScreen.HELP_TEXT)
 
 
+# --------------------------------------------------------------------- layout
+def test_layout() -> None:
+    """The banner and the sidebar must line up on a cell grid.
+
+    Terminals measure in cells, not characters, so a CJK label is twice as wide
+    as ``len()`` says and a line one cell too long wraps. These checks pin both
+    invariants down without needing a live terminal.
+    """
+
+    from jarvis import textwidth
+    from jarvis.tui.app import BANNER
+
+    rows = [line for line in BANNER.splitlines() if line.strip()]
+    widths = sorted({textwidth.dwidth(line) for line in rows})
+    check("横幅是 6 行", len(rows) == 6, str(len(rows)))
+    # The banner lives in the chat pane, so its width is the art's own (44), not
+    # the sidebar's - what matters is that all six rows agree.
+    check("横幅每行等宽", widths == [44], str(widths))
+    # The "J" only reads straight when its stem, hook and bowl share a corner
+    # column. The hand-typed original had them two columns apart, which is what
+    # made the banner look crooked.
+    corners = {rows[0].index("╗"), rows[3].index("║"), rows[4].index("╝")}
+    check("J 的竖笔与底部在同一列", corners == {7}, str(sorted(corners)))
+
+    check("汉字算 2 格", textwidth.dwidth("中文") == 4, str(textwidth.dwidth("中文")))
+    check("ASCII 算 1 格", textwidth.dwidth("abc") == 3, str(textwidth.dwidth("abc")))
+    check("pad 两字标签到 7 格", textwidth.dwidth(textwidth.pad("模型", 7)) == 7,
+          repr(textwidth.pad("模型", 7)))
+    check("pad 三字标签到 7 格", textwidth.dwidth(textwidth.pad("上下文", 7)) == 7,
+          repr(textwidth.pad("上下文", 7)))
+    clipped = textwidth.clip("中文" * 20, 10)
+    check("clip 结果不超过上限", textwidth.dwidth(clipped) <= 10, repr(clipped))
+    check("clip 短文本原样返回", textwidth.clip("短", 10) == "短")
+
+    cores = sysinfo.core_rows([100, 0, 33, 7] * 4, indent=7)
+    check("每核行共 2 行（16 核 / 每行 8）", len(cores) == 2, str(len(cores)))
+    check("每核行等宽且不超宽",
+          len({textwidth.dwidth(row) for row in cores}) == 1
+          and textwidth.dwidth(cores[0]) <= sysinfo.PANEL_WIDTH,
+          str([textwidth.dwidth(row) for row in cores]))
+
+    top = sysinfo.top_processes(5).splitlines()
+    check("TOP 表有表头", "CPU%" in top[0], top[0])
+    check("TOP 表 1 表头 + 5 行", len(top) == 6, str(len(top)))
+    check("TOP 表不超宽",
+          all(textwidth.dwidth(line) <= sysinfo.PANEL_WIDTH for line in top),
+          str([textwidth.dwidth(line) for line in top]))
+
+    snap = sysinfo.snapshot(include_processes=0)
+    over = [
+        key
+        for key, value in snap.items()
+        if isinstance(value, str)
+        and any(textwidth.dwidth(line) > sysinfo.PANEL_WIDTH for line in value.splitlines())
+    ]
+    check("侧边栏字段都不超宽", not over, ",".join(over) or f"全部 <= {sysinfo.PANEL_WIDTH} 格")
+    check("snapshot 带 cores 列表", isinstance(snap.get("cores"), list), str(type(snap.get("cores"))))
+
+
 def main() -> int:
     test_registry()
     test_clipboard_registry()
@@ -311,6 +372,7 @@ def main() -> int:
     test_guards()
     test_real_child()
     test_tui_hooks()
+    test_layout()
 
     faulthandler.cancel_dump_traceback_later()
     if FAILURES:

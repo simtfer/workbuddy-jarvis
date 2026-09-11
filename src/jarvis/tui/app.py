@@ -22,6 +22,7 @@ from ..core.agent import Agent, ConfirmRequest
 from ..core.scheduler import ScheduledTask, Scheduler, ScheduleError, TaskStore, parse_task_command
 from ..memory.store import HistoryStore, default_db_path
 from ..providers import SEARCH_PROVIDERS
+from ..textwidth import clip, pad
 from ..tools import build_registry, sysinfo
 from ..tools import clipboard as clipboard_mod
 from ..tools import notify as notify_mod
@@ -61,14 +62,18 @@ def split_flags(text: str) -> tuple[list[str], dict[str, str]]:
             positional.append(token)
     return positional, flags
 
+
+# figlet "ansi_shadow" of JARVIS. Every line is exactly 44 cells wide and the
+# glyphs only line up at that exact shape - re-indenting or re-wrapping it makes
+# the "J" drift away from its own bowl, which is what a crooked banner looks like.
 BANNER = r"""
-   ██╗ █████╗ ██████╗ ██╗   ██╗██╗███████╗
-   ██║██╔══██╗██╔══██╗██║   ██║██║██╔════╝
-   ██║███████║██████╔╝██║   ██║██║███████╗
-██ ██║██╔══██║██╔══██╗╚██╗ ██╔╝██║╚════██║
+     ██╗ █████╗ ██████╗ ██╗   ██╗██╗███████╗
+     ██║██╔══██╗██╔══██╗██║   ██║██║██╔════╝
+     ██║███████║██████╔╝██║   ██║██║███████╗
+██   ██║██╔══██║██╔══██╗╚██╗ ██╔╝██║╚════██║
 ╚█████╔╝██║  ██║██║  ██║ ╚████╔╝ ██║███████║
  ╚════╝ ╚═╝  ╚═╝╚═╝  ╚═╝  ╚═══╝  ╚═╝╚══════╝
-"""
+""".strip("\n")
 
 
 class JarvisApp(App[None]):
@@ -1170,51 +1175,83 @@ class JarvisApp(App[None]):
         self._top_text = text
         self._render_panel()
 
-    def _render_panel(self) -> None:
-        data = self._panel_data
-        if not data:
-            return
+    # Sidebar label column, in cells. Wide enough for the longest label (a
+    # three-glyph CJK word = 6 cells) plus a space, so every value in a section
+    # starts on the same column instead of drifting with the label's width.
+    SIDE_LABEL = 7
+
+    def _panel_lines(self, width: int) -> list[str]:
+        """Build the sidebar as fixed rows, every one clipped to ``width``.
+
+        Nothing here may exceed ``width``: ``#side`` does not scroll, so an
+        overlong line wraps and the column layout collapses.
+        """
+
+        data = self._panel_data or {}
         model = self.agent.model
         tasks = self.task_store.list()
-        next_task = min((t for t in tasks if t.enabled and t.next_run), key=lambda t: t.next_run, default=None)
+        next_task = min(
+            (task for task in tasks if task.enabled and task.next_run),
+            key=lambda task: task.next_run,
+            default=None,
+        )
+
+        def row(label: str, value: str) -> str:
+            return clip(pad(label, self.SIDE_LABEL) + value, width)
+
+        def fit(text: str) -> list[str]:
+            return [clip(line, width) for line in str(text).splitlines()] or [""]
+
+        lines = ["SYSTEM", clip(str(data.get("host", "")), width), ""]
+        lines.append(row("CPU", str(data.get("cpu", ""))))
+        lines += [
+            clip(line, width)
+            for line in sysinfo.core_rows(data.get("cores", []), indent=self.SIDE_LABEL)
+        ]
+        lines += [
+            row("MEM", str(data.get("memory", ""))),
+            row("SWAP", str(data.get("swap", ""))),
+            row("NET", str(data.get("net", ""))),
+            row("BATT", str(data.get("battery", ""))),
+            "",
+            "DISK",
+        ]
+        lines += fit(data.get("disks", ""))
+        lines += ["", "TOP 进程"]
+        lines += fit(self._top_text)
+        lines += [
+            "",
+            "SESSION",
+            row("模型", f"{model.display} · {model.model}"),
+            row("来源", f"{model.provider or '自定义'} · {model.base_url.split('//')[-1]}"),
+            row("工具", f"{len(self.registry.tools)} 个"),
+            row(
+                "搜索",
+                self.config.search.provider + ("" if self.config.search.enabled else "（关闭）"),
+            ),
+            row("上下文", f"{len(self.agent.history())} 条消息"),
+            row("记忆", f"{self.store.fact_count()} 条事实"),
+            row("计划", f"{len(self.agent.plan)} 步" + (" (执行中)" if self._busy else "")),
+            row(
+                "任务",
+                f"{len([task for task in tasks if task.enabled])} 个启用"
+                + (f"，下次 {next_task.next_run[5:16]}" if next_task else ""),
+            ),
+            row("会话", self.session_id),
+        ]
+        return lines
+
+    def _render_panel(self) -> None:
         try:
             panel = self.query_one("#syspanel", Static)
         except Exception:  # noqa: BLE001 - widget may already be gone
             return
-        panel.update(
-            "\n".join(
-                [
-                    "SYSTEM",
-                    data["host"],
-                    "",
-                    f"CPU   {data['cpu']}",
-                    f"      {data['per_cpu']}",
-                    f"MEM   {data['memory']}",
-                    f"SWAP  {data['swap']}",
-                    f"NET   {data['net']}",
-                    f"BATT  {data['battery']}",
-                    "",
-                    "DISK",
-                    data["disks"],
-                    "",
-                    "TOP 进程",
-                    self._top_text,
-                    "",
-                    "SESSION",
-                    f"模型   {model.display} · {model.model}",
-                    f"来源   {(model.provider or '自定义')} · {model.base_url.split('//')[-1][:26]}",
-                    f"工具   {len(self.registry.tools)} 个",
-                    f"搜索   {self.config.search.provider}"
-                    + ("" if self.config.search.enabled else "（关闭）"),
-                    f"上下文 {len(self.agent.history())} 条消息",
-                    f"记忆   {self.store.fact_count()} 条事实",
-                    f"计划   {len(self.agent.plan)} 步" + (" (执行中)" if self._busy else ""),
-                    f"任务   {len([t for t in tasks if t.enabled])} 个启用"
-                    + (f"，下次 {next_task.next_run[5:16]}" if next_task else ""),
-                    f"会话   {self.session_id}",
-                ]
-            )
-        )
+        # Measure the real box rather than trusting the CSS constant: before the
+        # first layout ``content_size`` is 0, so fall back to the fixed width.
+        width = panel.content_size.width
+        if not width or width < 20:
+            width = sysinfo.PANEL_WIDTH
+        panel.update("\n".join(self._panel_lines(width)))
 
 
 # --------------------------------------------------------------------- selftest

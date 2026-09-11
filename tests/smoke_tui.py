@@ -11,6 +11,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from jarvis import textwidth
 from jarvis.config import build_default_config, load_config
 from jarvis.core.agent import ConfirmRequest
 from jarvis.tui.app import JarvisApp
@@ -57,6 +58,17 @@ async def main() -> int:
             chat = app.query_one("#chat")
             check("应用启动并挂载界面", len(chat.children) >= 1)
             check("系统面板有内容", "CPU" in str(app.query_one("#syspanel").content))
+
+            # The sidebar must never wrap: a line one cell past the box turns the
+            # column layout into the ragged mess this test exists to prevent.
+            panel = app.query_one("#syspanel")
+            panel_width = panel.content_size.width or 44
+            panel_lines = str(panel.content).splitlines()
+            widest = max(textwidth.dwidth(line) for line in panel_lines)
+            check("侧边栏不换行", widest <= panel_width, f"最宽 {widest} 格 / 面板 {panel_width} 格")
+            check("侧边栏含四个分区", {"SYSTEM", "DISK", "TOP 进程", "SESSION"} <= set(panel_lines),
+                  ",".join(line for line in panel_lines if line in {"SYSTEM", "DISK", "TOP 进程", "SESSION"}))
+
             check("调度器已启动", app.scheduler is not None)
             check("测试用的是临时配置", app.config.path.parent == db.parent)
 

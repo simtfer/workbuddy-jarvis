@@ -228,6 +228,9 @@ def read_clipboard(max_chars: int = 8000) -> str:
         max_chars: Truncate the returned text to this many characters.
     """
 
+    if not isinstance(max_chars, int) or isinstance(max_chars, bool):
+        raise ToolError(f"read_clipboard 的 max_chars 需要整数，收到 {type(max_chars).__name__}。")
+
     with _ClipboardLock():
         text = _clipboard_text_locked()
         formats = _formats_locked()
@@ -261,6 +264,10 @@ def write_clipboard(text: str, append: bool = False) -> str:
         append: Append to the existing clipboard text instead of replacing it.
     """
 
+    if not isinstance(text, str):
+        # The model can hand us a number for "text"; fail with a readable message
+        # instead of letting it die later on ``str.encode``.
+        raise ToolError(f"write_clipboard 的 text 需要字符串，收到 {type(text).__name__}：{text!r}。")
     if append and not text:
         raise ToolError("append=true 时 text 不能为空。")
 

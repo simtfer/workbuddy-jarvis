@@ -5,7 +5,7 @@
 - **Phase 1**：Textual TUI + 可插拔 OpenAI 兼容模型 + 工具调用循环 + 破坏性操作确认 + 会话历史落库
 - **Phase 2**：长期记忆、计划模式（可执行的多步任务）、定时任务、全局热键常驻守护
 - **Phase 3**：自定义 provider（含内网/自建端点）、多模型热切换与故障自动切换、联网搜索与网页抓取、系统托盘图标
-- **Phase 4**：剪贴板读写（纯 ctypes，零依赖）、进程管理（列表 / 详情 / 结束 / 挂起恢复）；顺带修掉了 psutil 并发与系统面板卡界面的隐患
+- **Phase 4**：剪贴板读写（纯 ctypes，零依赖）、进程管理（列表 / 详情 / 结束 / 挂起恢复）；顺带修掉了 psutil 并发与系统面板卡界面的隐患，并把横幅与侧栏改成按终端「格」对齐
 
 ## 快速开始
 
@@ -174,6 +174,7 @@ TUI (Textual)  →  Agent 内核  →  工具层  →  LLM 适配 / 记忆
 - `src/jarvis/llm/` — 仅依赖 OpenAI 兼容协议；端点不支持 tools 时自动降级为纯对话
 - `src/jarvis/providers.py` — 内置 provider / 搜索后端预设目录 + base_url 反查
 - `src/jarvis/tomlwrite.py` — 最小 TOML 序列化（配置可写回）
+- `src/jarvis/textwidth.py` — 终端「格」宽计算（汉字算 2 格）与裁剪 / 补白：横幅、侧栏、进程表的对齐都走它
 - `src/jarvis/tools/` — `shell`（命令执行 + 黑名单护栏）、`fs`（读写/列目录/搜索）、`sysinfo`（psutil 快照 + 采样串行化）、`clipboard`（ctypes 剪贴板）、`procman`（进程管理）、`web`（搜索 + 正文抓取）、`notify`（Windows 通知）
 - `src/jarvis/memory/` — SQLite：会话历史 + 长期事实
 - `src/jarvis/daemon/` — `hotkey.py`（RegisterHotKey 全局热键）、`tray.py`（通知区图标 + 右键菜单）、`service.py`（守护进程、无人值守任务执行）
@@ -235,6 +236,9 @@ uv run python -u tests/screenshot.py    # 导出 docs/screenshot.svg 界面快�
 - Windows 上遍历进程比想象中贵（这台机器约 380 个进程，取一次 CPU+内存要 1–2 秒，`status` 字段单项就要 1.7 秒）。
   因此：进程列表只对**要显示的几行**取昂贵字段；侧栏的 CPU/内存/磁盘每 2 秒刷新、进程表每 10 秒刷新，
   且都在后台线程里采样；`psutil` 的采样被一把全局锁串行化（psutil 的 Windows 扩展在多线程同时枚举时会互相卡死）。
+- 终端按**格**排版，不看字符数：一个汉字占 2 格，所以 `len()` 补白一定会歪。侧栏所有行都按格裁剪到面板宽度
+  再显示（`#side` 46 − 左右各 1 格内边距 − 1 格左边框 = **43 格**）；超宽的行在侧栏里会折行，列就散了。
+  改 `#side` 宽度时记得同步 `sysinfo.PANEL_WIDTH`，横幅（`BANNER`，44 格宽）别手动重排。
 
 ## 路线图
 
