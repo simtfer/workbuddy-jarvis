@@ -25,6 +25,24 @@ _QUEUE_END = object()
 FactsProvider = Callable[[], list[str]]
 
 
+def _close_later(client: LLMClient) -> None:
+    """Release a discarded client's connection pool without blocking."""
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    loop.create_task(_silent_close(client))
+
+
+async def _silent_close(client: LLMClient) -> None:
+    try:
+        await client.aclose()
+    except Exception:  # noqa: BLE001 - best effort cleanup
+        pass
+
+
+
 @dataclass
 class ConfirmRequest:
     """A dangerous tool call waiting for the user's blessing."""
@@ -61,10 +79,15 @@ class Agent:
     facts_provider: FactsProvider | None = None
     plan: list[PlanStep] = field(default_factory=list)
     plan_goal: str = ""
+    # Builds the client for a model. Swapped in tests to avoid real endpoints.
+    client_factory: Callable[[Any], Any] | None = None
     _client: LLMClient | None = None
+    _client_model: str | None = None
     _last_result: StreamResult | None = None
 
     def __post_init__(self) -> None:
+        if self.client_factory is None:
+            self.client_factory = LLMClient
         self.reset()
 
     # --------------------------------------------------------------- lifecycle
@@ -94,19 +117,55 @@ class Agent:
     def model(self):
         return self.config.model(self.model_name)
 
-    def set_model(self, name: str) -> None:
-        self.config.model(name)  # validation
-        self.model_name = name
+    @property
+    def model_key(self) -> str:
+        return self.model_name or self.config.default_model
+
+    def set_model(self, token: str) -> str:
+        """Hot-swap the model. Accepts a key, an index, or a model id."""
+
+        key = self.config.find_model(token)
+        if key is None:
+            raise KeyError(
+                f"找不到模型 '{token}'。可选：{', '.join(self.config.model_names())}"
+            )
+        self.model_name = key
         self._client = None
+        self._client_model = None
+        return key
 
     @property
     def client(self) -> LLMClient:
         if self._client is None:
-            self._client = LLMClient(self.model)
+            self._client = self._build_client(self.model)
+            self._client_model = self.model_key
         return self._client
 
+    def _build_client(self, model: Any) -> Any:
+        factory = self.client_factory or LLMClient
+        return factory(model)
+
     def drop_client(self) -> None:
+        self._forget_client(close=False)
+
+    def _forget_client(self, *, close: bool = True) -> None:
+        """Uncache the current client, closing its HTTP pool unless asked not to."""
+
+        stale = self._client
         self._client = None
+        self._client_model = None
+        if close and stale is not None:
+            _close_later(stale)
+
+    def failover_chain(self) -> list[str]:
+        """Models to try, in order: the active one first, then the fallbacks."""
+
+        current = self.model_key
+        chain = [current]
+        for name in self.config.fallbacks_for(current):
+            if name not in chain:
+                chain.append(name)
+        return chain
 
     async def aclose(self) -> None:
         """Close the HTTP pool held by the current client."""
@@ -315,34 +374,103 @@ class Agent:
     async def _iterate(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None
     ) -> AsyncIterator[dict[str, Any]]:
-        """Stream one completion, yielding text events; result lands in _last_result."""
+        """Stream one completion, yielding text events; result lands in _last_result.
 
-        queue: asyncio.Queue = asyncio.Queue()
-        task = asyncio.create_task(
-            self.client.stream(
-                messages,
-                tools=tools,
-                on_delta=lambda text: queue.put_nowait(text),
+        If the active model fails (network, quota, dead key) the remaining
+        models from :meth:`failover_chain` are tried in order, and the first
+        one that answers becomes the active model for the rest of the session.
+        """
+
+        chain = self.failover_chain()
+        last_error = ""
+        for index, key in enumerate(chain):
+            if index:
+                yield {
+                    "type": "notice",
+                    "text": f"⚠ 模型 {chain[index - 1]} 不可用（{last_error}），已自动切到 {key}。"
+                            f"想切回来：/model {chain[0]}",
+                }
+
+            try:
+                client = self._client_for(key)
+            except LLMError as exc:
+                last_error = str(exc).splitlines()[0]
+                self._forget_client()
+                continue
+            except Exception as exc:  # noqa: BLE001
+                last_error = f"{type(exc).__name__}: {exc}"
+                self._forget_client()
+                continue
+
+            self._last_result = None
+            queue: asyncio.Queue = asyncio.Queue()
+            task = asyncio.create_task(
+                client.stream(
+                    messages,
+                    tools=tools,
+                    on_delta=lambda text: queue.put_nowait(text),
+                )
             )
-        )
-        task.add_done_callback(lambda _t: queue.put_nowait(_QUEUE_END))
+            task.add_done_callback(lambda _t: queue.put_nowait(_QUEUE_END))
 
-        self._last_result = None
-        while True:
-            item = await queue.get()
-            if item is _QUEUE_END:
-                break
-            yield {"type": "text", "text": item}
+            while True:
+                item = await queue.get()
+                if item is _QUEUE_END:
+                    break
+                yield {"type": "text", "text": item}
 
-        try:
-            self._last_result = await task
-        except LLMError as exc:
-            yield {"type": "error", "message": str(exc)}
-        except asyncio.CancelledError:
-            task.cancel()
-            raise
-        except Exception as exc:  # noqa: BLE001
-            yield {"type": "error", "message": f"{type(exc).__name__}: {exc}"}
+            try:
+                self._last_result = await task
+            except LLMError as exc:
+                last_error = str(exc).splitlines()[0]
+                self._forget_client()
+                if index + 1 < len(chain):
+                    yield {"type": "notice", "text": f"模型 {key} 请求失败：{last_error}"}
+                continue
+            except asyncio.CancelledError:
+                task.cancel()
+                raise
+            except Exception as exc:  # noqa: BLE001
+                last_error = f"{type(exc).__name__}: {exc}"
+                self._forget_client()
+                if index + 1 < len(chain):
+                    continue
+
+            if index:
+                # The fallback answered - make the switch permanent and tell the user.
+                self.model_name = key
+                self._client_model = key
+            return
+
+        yield {
+            "type": "error",
+            "message": f"所有模型都请求失败（{' → '.join(chain)}）。最后一个错误：{last_error}",
+        }
+
+    def _client_for(self, key: str) -> LLMClient:
+        """Return a cached client for ``key``, building it on first use.
+
+        The client (and its HTTP connection pool) is cached so consecutive
+        turns reuse one pool instead of opening a new one every time.
+        """
+
+        if self._client is not None and self._client_model == key:
+            return self._client
+        if self._client is not None:
+            # The cached client belongs to another model: drop it without leaking.
+            stale = self._client
+            self._client = None
+            self._client_model = None
+            _close_later(stale)
+        client = self._build_client(self.config.model(key))
+        self._client = client
+        self._client_model = key
+        return client
+
+    def adopt_client(self, key: str) -> LLMClient:
+        """Cache a freshly built client so the next turn reuses it."""
+
+        return self._client_for(key)
 
     # ----------------------------------------------------------------- helpers
     @staticmethod

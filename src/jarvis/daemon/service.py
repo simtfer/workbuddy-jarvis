@@ -13,9 +13,10 @@ from ..config import DATA_DIR, Config
 from ..core.agent import Agent
 from ..core.scheduler import ScheduledTask, Scheduler, TaskStore
 from ..memory.store import HistoryStore, default_db_path
-from ..tools import build_registry
+from ..tools import build_registry, sysinfo
 from ..tools import notify as notify_mod
 from .hotkey import GlobalHotkey, describe
+from .tray import TrayIcon, describe_state
 
 PID_FILE = DATA_DIR / "jarvis.pid"
 LOG_FILE = DATA_DIR / "daemon.log"
@@ -74,7 +75,7 @@ def clear_pid() -> None:
 def build_task_agent(config: Config, store: HistoryStore, task: ScheduledTask) -> Agent:
     """An agent for unattended runs: dangerous tools only if the task opted in."""
 
-    registry = build_registry(config.security, str(config.workdir))
+    registry = build_registry(config.security, str(config.workdir), config.search)
 
     async def handler(request):  # noqa: ANN001, ANN202
         if task.allow_dangerous:
@@ -134,8 +135,9 @@ async def run_daemon(
     hotkey: str | None = None,
     with_scheduler: bool = True,
     open_tui: bool = True,
+    tray: bool = True,
 ) -> int:
-    """Block until Ctrl+C, serving the global hotkey and the task scheduler."""
+    """Block until Ctrl+C or the tray's 退出, serving hotkey + scheduler + tray."""
 
     running = already_running()
     if running:
@@ -147,12 +149,61 @@ async def run_daemon(
     hotkey_spec = hotkey or config.daemon.hotkey
     listener: GlobalHotkey | None = None
     scheduler: Scheduler | None = None
+    tray_icon: TrayIcon | None = None
+    task_store = TaskStore(store.conn)
+    stop_event = asyncio.Event()
 
-    def on_hotkey() -> None:
-        log(f"热键 {describe(hotkey_spec)} 触发")
+    def open_window(why: str) -> None:
+        log(f"{why} → 拉起 JARVIS 窗口")
         if open_tui:
             process = spawn_tui()
             log(f"  已拉起 TUI 窗口（pid={process.pid if process else '失败'}）")
+
+    def on_hotkey() -> None:
+        open_window(f"热键 {describe(hotkey_spec)} 触发")
+
+    def on_tray_open() -> None:
+        open_window("托盘：打开 JARVIS")
+
+    def on_tray_tasks() -> None:
+        tasks = [t for t in task_store.list() if t.enabled]
+        if not tasks:
+            tell("JARVIS · 定时任务", "当前没有启用中的定时任务")
+            return
+        upcoming = sorted(tasks, key=lambda t: t.next_run or "9999")
+        lines = [
+            f"#{t.id} {t.next_run[5:16] if t.next_run else '-'} {t.title[:26]}"
+            for t in upcoming[:5]
+        ]
+        tell(f"JARVIS · {len(tasks)} 个定时任务", "\n".join(lines))
+        log(f"托盘：查看任务（{len(tasks)} 个启用）")
+
+    def on_tray_status() -> None:
+        try:
+            data = sysinfo.snapshot(include_processes=0)
+            model = config.model(config.default_model)
+            text = (
+                f"CPU {data['cpu']} · MEM {data['memory']}\n"
+                f"模型 {model.display} · 搜索 {config.search.provider}\n"
+                f"热键 {describe(hotkey_spec)} · pid {os.getpid()}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            text = f"状态采集失败：{exc}"
+        tell("JARVIS · 状态", text)
+
+    def on_tray_quit() -> None:
+        log("托盘：退出")
+        loop.call_soon_threadsafe(stop_event.set)
+
+    def tell(title: str, message: str) -> None:
+        """Prefer the tray balloon (no subprocess); fall back to a Windows toast."""
+
+        if tray_icon is not None and tray_icon.available and tray_icon.notify(title, message):
+            return
+        if config.daemon.notify:
+            notify_mod.notify(title, message)
+
+    loop = asyncio.get_running_loop()
 
     try:
         listener = GlobalHotkey(hotkey_spec, on_hotkey).start()
@@ -162,16 +213,26 @@ async def run_daemon(
             log(f"热键就绪：{describe(hotkey_spec)}")
 
         if with_scheduler:
-            task_store = TaskStore(store.conn)
             scheduler = Scheduler(task_store, runner=_make_runner(config, store))
             scheduler.on_error = lambda task, err: log(f"任务#{task.id} 出错：{err}")
             scheduler.start()
             pending = [t for t in task_store.list() if t.enabled]
             log(f"调度器已启动，共 {len(pending)} 个启用任务，每 {scheduler.check_interval:.0f}s 检查一次")
 
-        log(f"守护进程 pid={os.getpid()}，Ctrl+C 退出")
-        while True:
-            await asyncio.sleep(3600)
+        if tray and config.daemon.tray:
+            tray_icon = TrayIcon(
+                tooltip=config.daemon.tray_tooltip,
+                on_open=on_tray_open,
+                on_tasks=on_tray_tasks,
+                on_status=on_tray_status,
+                on_quit=on_tray_quit,
+            ).start()
+            log(describe_state(tray_icon))
+        else:
+            log("托盘图标：已按要求关闭")
+
+        log(f"守护进程 pid={os.getpid()}，Ctrl+C 或托盘「退出」结束")
+        await stop_event.wait()
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
@@ -179,8 +240,10 @@ async def run_daemon(
             await scheduler.stop()
         if listener is not None:
             listener.stop()
+        if tray_icon is not None:
+            tray_icon.stop()
         store.close()
-        if config.daemon.notify:
+        if config.daemon.notify and sys.platform == "win32":
             await asyncio.to_thread(notify_mod.notify, "JARVIS", "守护进程已退出")
         clear_pid()
         log("守护进程已退出")

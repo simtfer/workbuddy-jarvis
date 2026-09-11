@@ -4,15 +4,20 @@ from __future__ import annotations
 
 from functools import partial
 
-from ..config import SecurityConfig
+from ..config import SearchConfig, SecurityConfig
 from ..core.registry import Tool, ToolRegistry
-from . import fs, shell, sysinfo
+from . import fs, shell, sysinfo, web
 
 
-def build_registry(security: SecurityConfig, workdir: str) -> ToolRegistry:
-    """Create a registry with every Phase-1 tool wired to the config."""
+def build_registry(
+    security: SecurityConfig,
+    workdir: str,
+    search: SearchConfig | None = None,
+) -> ToolRegistry:
+    """Create a registry with every tool wired to the config."""
 
     registry = ToolRegistry(security)
+    search_cfg = search or SearchConfig()
 
     # ---------------------------------------------------------------- shell
     def run_shell(command: str, cwd: str = "") -> str:
@@ -124,6 +129,45 @@ def build_registry(security: SecurityConfig, workdir: str) -> ToolRegistry:
         )
     )
 
+    # ------------------------------------------------------------------ web
+    registry.register(
+        Tool(
+            name="web_search",
+            description=(
+                "联网搜索，返回标题 / 网址 / 摘要列表。需要最新信息、你不确定的事、"
+                "或用户提到「查一下」「搜一下」「最新的」时用它。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "搜索关键词，越具体越好"},
+                    "max_results": {"type": "integer", "description": "返回条数，默认 5，最多 20"},
+                    "provider": {
+                        "type": "string",
+                        "description": "临时改用别的搜索后端：duckduckgo / bocha / tavily / serper / searxng",
+                    },
+                },
+                "required": ["query"],
+            },
+            func=partial(_web_search, search_cfg),
+        )
+    )
+    registry.register(
+        Tool(
+            name="fetch_url",
+            description="打开一个网址并把正文抓成纯文本，用来读文章、文档或搜索结果里的页面。",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "完整网址，例如 https://example.com/a"},
+                    "max_chars": {"type": "integer", "description": "最多返回字符数，默认 8000"},
+                },
+                "required": ["url"],
+            },
+            func=web.fetch,
+        )
+    )
+
     return registry
 
 
@@ -133,3 +177,9 @@ def _list_dir(workdir: str, path: str = "", show_hidden: bool = False) -> str:
 
 def _search_files(workdir: str, pattern: str, path: str = "", max_results: int = 60) -> str:
     return fs.search_files(pattern, path or workdir, max_results=max_results)
+
+
+def _web_search(
+    cfg: SearchConfig, query: str, max_results: int = 0, provider: str = ""
+) -> str:
+    return web.search(query, cfg, max_results=max_results or None, provider=provider or None)

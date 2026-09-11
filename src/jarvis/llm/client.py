@@ -50,7 +50,7 @@ class LLMClient:
     def __init__(self, cfg: ModelConfig) -> None:
         self.cfg = cfg
         api_key = cfg.resolve_api_key()
-        if not api_key and "localhost" not in cfg.base_url and "127.0.0.1" not in cfg.base_url:
+        if not api_key and not cfg.is_local:
             raise LLMError(
                 f"模型 '{cfg.display}' 未配置 API Key。\n"
                 f"请在 config.toml 的 [models.{cfg.name}] 里填写 api_key，"
@@ -59,7 +59,7 @@ class LLMClient:
         self.client = AsyncOpenAI(
             base_url=cfg.base_url,
             api_key=api_key or "not-needed",
-            timeout=180.0,
+            timeout=cfg.timeout,
             max_retries=1,
         )
         self.tools_supported = cfg.supports_tools

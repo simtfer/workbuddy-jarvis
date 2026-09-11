@@ -80,6 +80,18 @@ def make_config() -> Config:
     )
 
 
+def make_agent(replies: list[object]) -> tuple[Agent, FakeClient]:
+    """An Agent wired to a canned client (no network), plus that client."""
+
+    client = FakeClient(replies)
+    agent = Agent(
+        config=make_config(),
+        registry=make_registry(),
+        client_factory=lambda _model: client,
+    )
+    return agent, client
+
+
 def make_registry() -> ToolRegistry:
     registry = ToolRegistry(SecurityConfig())
     registry.register(
@@ -251,8 +263,7 @@ def test_task_parsing() -> None:
 
 # ------------------------------------------------------------------ agent tests
 def test_agent_plan(tmp: Path) -> None:
-    agent = Agent(config=make_config(), registry=make_registry())
-    agent._client = FakeClient(
+    agent, client = make_agent(
         [
             '```json\n{"goal":"体检","steps":[{"title":"看磁盘","detail":"用 sys_report"},{"title":"汇报"}]}\n```',
             "磁盘还剩很多。",
@@ -269,15 +280,15 @@ def test_agent_plan(tmp: Path) -> None:
         check("执行计划有 step_start/step_done", kinds.count("step_start") == 2 and kinds.count("step_done") == 2)
         check("执行计划有 plan_done", kinds[-1] == "plan_done")
         check("步骤状态全部 done", all(step.status == "done" for step in agent.plan))
-        check("规划请求未带工具", agent._client.calls[0]["tools"] is None)  # type: ignore[union-attr]
+        check("规划请求未带工具", client.calls[0]["tools"] is None)
+        check("多轮对话复用同一个客户端", client is agent._client)
 
     asyncio.run(run())
     asyncio.run(agent.aclose())
 
 
 def test_agent_tools() -> None:
-    agent = Agent(config=make_config(), registry=make_registry())
-    agent._client = FakeClient(
+    agent, _client = make_agent(
         [
             StreamResult(
                 content="",
@@ -301,8 +312,7 @@ def test_agent_tools() -> None:
 
 
 def test_agent_confirmation() -> None:
-    agent = Agent(config=make_config(), registry=make_registry())
-    agent._client = FakeClient(
+    agent, _client = make_agent(
         [
             StreamResult(content="", tool_calls=[ToolCall(id="c1", name="danger_test", arguments="{}")]),
             "好的，我停下。",
@@ -333,6 +343,7 @@ def test_agent_facts_prompt(tmp: Path, store: HistoryStore) -> None:
         config=make_config(),
         registry=make_registry(),
         facts_provider=lambda: [text for _id, text in store.facts(5)],
+        client_factory=lambda _model: FakeClient(['["用户偏好 PowerShell", "项目在 D 盘", 123, ""]']),
     )
     system = agent.messages[0]["content"]
     check("事实注入系统提示", "用户喜欢简洁的中文回答" in system and "长期记忆" in system)
@@ -341,12 +352,12 @@ def test_agent_facts_prompt(tmp: Path, store: HistoryStore) -> None:
     agent.refresh_system()
     check("刷新后包含新事实", "项目用 uv 管理依赖" in agent.messages[0]["content"])
 
-    agent._client = FakeClient(['["用户偏好 PowerShell", "项目在 D 盘", 123, ""]'])
     learned = asyncio.run(agent.learn("用户: 我在 D 盘写代码"))
     check("learn 提取字符串事实", learned == ["用户偏好 PowerShell", "项目在 D 盘"])
     asyncio.run(agent.aclose())
 
-    agent._client = FakeClient(["完全不是 JSON"])
+    agent.client_factory = lambda _model: FakeClient(["完全不是 JSON"])
+    agent.drop_client()
     check("learn 解析失败返回空", asyncio.run(agent.learn("随便聊聊")) == [])
     asyncio.run(agent.aclose())
 

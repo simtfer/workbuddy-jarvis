@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import shlex
 import time
 from datetime import datetime
 from pathlib import Path
@@ -19,8 +21,10 @@ from ..config import Config, load_config
 from ..core.agent import Agent, ConfirmRequest
 from ..core.scheduler import ScheduledTask, Scheduler, ScheduleError, TaskStore, parse_task_command
 from ..memory.store import HistoryStore, default_db_path
+from ..providers import SEARCH_PROVIDERS
 from ..tools import build_registry, sysinfo
 from ..tools import notify as notify_mod
+from ..tools import web
 from .screens import ConfirmScreen, HelpScreen
 from .widgets import (
     AssistantMessage,
@@ -30,6 +34,31 @@ from .widgets import (
     ToolResultView,
     UserMessage,
 )
+
+
+def split_flags(text: str) -> tuple[list[str], dict[str, str]]:
+    """``"gpt --provider openai --model gpt-4o"`` -> (["gpt"], {...}).
+
+    ``--flag value`` pairs go into the dict; ``--bare`` becomes ``{"bare": ""}``.
+    """
+
+    try:
+        tokens = shlex.split(text)
+    except ValueError:
+        tokens = text.split()
+    positional: list[str] = []
+    flags: dict[str, str] = {}
+    pending: str | None = None
+    for token in tokens:
+        if token.startswith("--"):
+            pending = token[2:].lower()
+            flags.setdefault(pending, "")
+        elif pending is not None:
+            flags[pending] = token
+            pending = None
+        else:
+            positional.append(token)
+    return positional, flags
 
 BANNER = r"""
    ██╗ █████╗ ██████╗ ██╗   ██╗██╗███████╗
@@ -94,7 +123,7 @@ class JarvisApp(App[None]):
         self.session_id = self.store.new_session_id()
         self.store.ensure_session(self.session_id, config.default_model)
         self.task_store = TaskStore(self.store.conn)
-        self.registry = build_registry(config.security, str(config.workdir))
+        self.registry = build_registry(config.security, str(config.workdir), config.search)
         self.agent = Agent(
             config=config,
             registry=self.registry,
@@ -173,6 +202,13 @@ class JarvisApp(App[None]):
                 "info",
             )
         )
+        chain = self.config.fallbacks_for(self.agent.model_key)
+        if len(chain) > 1:
+            await self._append(
+                Notice(f"主模型不可用时按顺序自动切：{' → '.join(chain)}（/model fallback 可改）", "info")
+            )
+        if self.config.search.enabled:
+            await self._append(Notice(f"联网搜索 {web.describe(self.config.search)}", "info"))
         if self.config.created:
             await self._append(
                 Notice(f"已生成配置文件 {self.config.path}，请填写 API Key 后重启或换模型。", "warn")
@@ -381,15 +417,14 @@ class JarvisApp(App[None]):
                 for tool in self.registry.tools
             ]
             await self._append(Notice("可用工具：\n" + "\n".join(lines), "info"))
-        elif command in {"/model", "/models"} and not rest:
-            await self._show_models()
-        elif command == "/model" and rest:
-            try:
-                self.agent.set_model(args[0])
-            except KeyError as exc:
-                await self._append(Notice(str(exc.args[0]), "warn"))
-                return
-            await self._append(Notice(f"已切换到 {args[0]} · {self.agent.model.model}", "info"))
+        elif command in {"/model", "/models"}:
+            await self._handle_model_command(rest)
+        elif command in {"/provider", "/providers"}:
+            await self._handle_provider_command(rest)
+        elif command == "/search":
+            await self._handle_search_command(rest)
+        elif command == "/fetch" and rest:
+            await self._fetch_page(rest)
         elif command == "/history":
             await self._show_history()
         elif command == "/resume" and rest:
@@ -424,24 +459,326 @@ class JarvisApp(App[None]):
             await self._handle_task_command(rest)
         elif command == "/daemon":
             hotkey = self.config.daemon.hotkey
+            tray = "开" if self.config.daemon.tray else "关"
             await self._append(
                 Notice(
-                    "常驻守护：`uv run jarvis --daemon`（全局热键 "
-                    f"{hotkey} 唤起新窗口，并在后台跑定时任务）。\n"
-                    "当前窗口若要接管调度器，直接启动 TUI 即可（不加 --no-scheduler）。",
+                    "常驻守护：`uv run jarvis --daemon`\n"
+                    f"  · 全局热键 {hotkey} 唤起新窗口\n"
+                    f"  · 系统托盘图标：{tray}（右键菜单：打开 JARVIS / 定时任务 / 状态 / 退出）\n"
+                    "  · 后台跑定时任务（当前窗口若也要接管，直接启动 TUI 即可）",
                     "info",
                 )
             )
         else:
             await self._append(Notice(f"未知命令 {command}，/help 查看全部命令。", "warn"))
 
+    # ------------------------------------------------------------------- models
+    async def _handle_model_command(self, rest: str) -> None:
+        positional, flags = split_flags(rest)
+        action = positional[0].lower() if positional else "list"
+        payload = positional[1:] if len(positional) > 1 else []
+
+        if action in {"list", ""}:
+            await self._show_models()
+        elif action == "add":
+            await self._add_model(payload, flags)
+        elif action in {"rm", "del", "remove"}:
+            await self._remove_model(payload, flags)
+        elif action in {"default", "use"}:
+            await self._set_default_model(payload)
+        elif action == "fallback":
+            await self._set_fallbacks(payload)
+        else:
+            await self._switch_model(" ".join(positional))
+
     async def _show_models(self) -> None:
+        current = self.agent.model_key
+        names = self.config.model_names()
         lines = []
-        for name, model in sorted(self.config.models.items()):
-            mark = "▶" if name == (self.agent.model_name or self.config.default_model) else " "
-            key = "已配置 Key" if model.resolve_api_key() else "缺 Key"
-            lines.append(f"{mark} {name:<10} {model.model:<28} {key}")
-        await self._append(Notice("模型列表（/model <名字> 切换）：\n" + "\n".join(lines), "info"))
+        for index, name in enumerate(names, start=1):
+            model = self.config.models[name]
+            mark = "▶" if name == current else " "
+            key_state = "已配 Key" if model.key_ready else "⚠ 缺 Key"
+            provider = f"[{model.provider}]" if model.provider else "[自定义]"
+            lines.append(f"{mark} {index}. {name:<10} {provider:<13} {model.model:<26} {key_state}")
+        chain = " → ".join(self.config.fallbacks_for(current)) or "（自动挑已配 Key 的）"
+        await self._append(
+            Notice(
+                "模型列表（/model <序号|名字> 热切换，切换后上下文保留）：\n"
+                + "\n".join(lines)
+                + f"\n\n当前 ▶ {current} · 故障自动切换：{chain}"
+                + "\n新增：/model add <名字> --provider <provider> --model <模型ID> [--env VAR]"
+                + " [--key sk-xxx] [--url ...] [--timeout 秒] [--default]",
+                "info",
+            )
+        )
+
+    async def _switch_model(self, token: str) -> None:
+        if self._busy:
+            await self._append(Notice("正在跑任务，等它结束再切模型（Ctrl+X 可取消）。", "warn"))
+            return
+        previous = self.agent.model_key
+        try:
+            key = self.agent.set_model(token)
+        except KeyError as exc:
+            await self._append(Notice(str(exc.args[0]), "warn"))
+            return
+        model = self.config.models[key]
+        if key == previous:
+            await self._append(Notice(f"已经是 {key}（{model.model}）了。", "info"))
+            return
+        await self._append(
+            Notice(
+                f"已切换到 {key} · {model.model}"
+                f"（{model.base_url}）{' ⚠ 还没配 Key' if not model.key_ready else ''}"
+                f"\n上下文 {len(self.agent.history())} 条消息保持不变。",
+                "info" if model.key_ready else "warn",
+            )
+        )
+
+    async def _add_model(self, payload: list[str], flags: dict[str, str]) -> None:
+        name = (payload[0] if payload else flags.get("name", "")).strip()
+        if not name:
+            await self._append(
+                Notice(
+                    "用法：/model add <名字> --provider <provider> --model <模型ID>"
+                    " [--env VAR] [--key sk-xxx] [--url https://...] [--label 显示名] [--timeout 秒] [--default]\n"
+                    "例：/model add gpt --provider openai --model gpt-4o-mini --env OPENAI_API_KEY",
+                    "warn",
+                )
+            )
+            return
+        try:
+            cfg = self.config.add_model(
+                name,
+                provider=flags.get("provider", ""),
+                model=flags.get("model", ""),
+                label=flags.get("label", ""),
+                base_url=flags.get("url", "") or flags.get("base-url", ""),
+                api_key=flags.get("key", ""),
+                api_key_env=flags.get("env", ""),
+                temperature=float(flags.get("temperature", 0.3) or 0.3),
+                timeout=float(flags.get("timeout", 180.0) or 180.0),
+                make_default="default" in flags,
+            )
+        except (ValueError, KeyError) as exc:
+            await self._append(Notice(str(exc.args[0] if exc.args else exc), "warn"))
+            return
+        self.agent.config = self.config
+        await self._append(
+            Notice(
+                f"已写入模型 {cfg.name}：{cfg.model} @ {cfg.base_url}\n"
+                f"配置已保存到 {self.config.path}。切换：/model {cfg.name}"
+                + ("（已设为默认）" if "default" in flags else ""),
+                "info",
+            )
+        )
+
+    async def _remove_model(self, payload: list[str], flags: dict[str, str]) -> None:
+        token = (payload[0] if payload else flags.get("name", "")).strip()
+        if not token:
+            await self._append(Notice("用法：/model rm <名字>", "warn"))
+            return
+        key = self.config.find_model(token) or token
+        if key == self.agent.model_key:
+            await self._append(Notice("正在用的是这个模型，先 /model 切到别的再删。", "warn"))
+            return
+        try:
+            removed = self.config.remove_model(key)
+        except ValueError as exc:
+            await self._append(Notice(str(exc), "warn"))
+            return
+        await self._append(
+            Notice(f"已删除模型 {key}。" if removed else f"没有模型 {key}。",
+                   "info" if removed else "warn")
+        )
+
+    async def _set_default_model(self, payload: list[str]) -> None:
+        token = payload[0] if payload else ""
+        if not token:
+            await self._append(Notice("用法：/model default <名字>（下次启动用它）", "warn"))
+            return
+        try:
+            cfg = self.config.set_default(self.config.find_model(token) or token)
+        except KeyError as exc:
+            await self._append(Notice(str(exc.args[0]), "warn"))
+            return
+        await self._append(Notice(f"默认模型已设为 {cfg.name}（写回 config.toml）。", "info"))
+
+    async def _set_fallbacks(self, payload: list[str]) -> None:
+        if not payload:
+            chain = ", ".join(self.config.fallback_models) or "（未设置，运行时自动挑选）"
+            await self._append(
+                Notice(f"故障切换链：{chain}\n用法：/model fallback qwen ollama（写回 config.toml）", "info")
+            )
+            return
+        resolved: list[str] = []
+        for token in payload:
+            key = self.config.find_model(token)
+            if key:
+                resolved.append(key)
+        self.config.fallback_models = resolved
+        self.config.save()
+        await self._append(
+            Notice(f"故障切换链已设为：{' → '.join(resolved) or '（空，自动挑选）'}", "info")
+        )
+
+    # ---------------------------------------------------------------- providers
+    async def _handle_provider_command(self, rest: str) -> None:
+        positional, flags = split_flags(rest)
+        action = positional[0].lower() if positional else "list"
+        payload = positional[1:] if len(positional) > 1 else []
+
+        if action in {"list", ""}:
+            await self._show_providers()
+        elif action == "add":
+            await self._add_provider(payload, flags)
+        elif action in {"rm", "del", "remove"}:
+            await self._remove_provider(payload)
+        else:
+            await self._show_provider(action)
+
+    async def _show_providers(self) -> None:
+        in_use: dict[str, list[str]] = {}
+        for name, model in self.config.models.items():
+            if model.provider:
+                in_use.setdefault(model.provider, []).append(name)
+
+        lines = ["对话模型（/model add <名字> --provider <名字> --model <模型ID>）："]
+        for name in self.config.catalog.names():
+            preset = self.config.catalog.require(name)
+            custom = "※自定义" if name in self.config.user_providers else ""
+            used = f" · 在用：{','.join(in_use[name])}" if name in in_use else ""
+            key_state = ""
+            if preset.api_key_env:
+                ready = bool(os.environ.get(preset.api_key_env, "").strip())
+                key_state = f" · {preset.api_key_env}{'✓' if ready else '（未设置）'}"
+            lines.append(f"  {name:<12} {preset.label:<22} {preset.base_url}{used}{key_state}{custom}")
+
+        lines.append("")
+        lines.append("搜索后端（/search backend <名字>）：")
+        for name, preset in sorted(SEARCH_PROVIDERS.items()):
+            mark = "▶" if name == self.config.search.provider else " "
+            key_state = ""
+            if preset.needs_key:
+                key_state = " " + ("Key ✓" if self.config.search.resolve_api_key() else "⚠ 缺 Key")
+            lines.append(f"{mark} {name:<12} {preset.label}{key_state}")
+
+        lines.append("")
+        lines.append(
+            "自定义 endpoint：/provider add <名字> <base_url> [--env VAR] [--label 显示名]"
+            "\n 例：/provider add myvllm http://10.0.0.5:8000/v1 --env MYVLLM_KEY --label 公司内网"
+        )
+        await self._append(Notice("\n".join(lines), "info"))
+
+    async def _show_provider(self, name: str) -> None:
+        preset = self.config.catalog.get(name)
+        if preset is None:
+            await self._append(Notice(f"没有 provider '{name}'，/provider list 看全部。", "warn"))
+            return
+        using = [n for n, m in self.config.models.items() if m.provider == name]
+        await self._append(
+            Notice(
+                f"{name} · {preset.label}\n"
+                f"base_url     {preset.base_url}\n"
+                f"api_key_env  {preset.api_key_env or '(不需要)'}\n"
+                f"常见模型     {', '.join(preset.models) or '(未列)'}\n"
+                f"控制台       {preset.console or '-'}\n"
+                f"在用模型     {', '.join(using) or '无'}"
+                + (f"\n备注         {preset.note}" if preset.note else ""),
+                "info",
+            )
+        )
+
+    async def _add_provider(self, payload: list[str], flags: dict[str, str]) -> None:
+        name = (payload[0] if payload else flags.get("name", "")).strip()
+        base_url = (payload[1] if len(payload) > 1 else flags.get("url", "")).strip()
+        if not name or not base_url:
+            await self._append(
+                Notice(
+                    "用法：/provider add <名字> <base_url> [--env VAR] [--label 显示名]\n"
+                    "例：/provider add myvllm http://10.0.0.5:8000/v1 --env MYVLLM_KEY",
+                    "warn",
+                )
+            )
+            return
+        try:
+            preset = self.config.add_provider(
+                name,
+                base_url=base_url,
+                label=flags.get("label", ""),
+                api_key_env=flags.get("env", ""),
+            )
+        except ValueError as exc:
+            await self._append(Notice(str(exc), "warn"))
+            return
+        await self._append(
+            Notice(
+                f"已添加 provider {preset.name} · {preset.label} → {preset.base_url}\n"
+                f"接着加模型：/model add <名字> --provider {preset.name} --model <模型ID>",
+                "info",
+            )
+        )
+
+    async def _remove_provider(self, payload: list[str]) -> None:
+        name = payload[0] if payload else ""
+        if not name:
+            await self._append(Notice("用法：/provider rm <名字>（只删自定义的）", "warn"))
+            return
+        removed = self.config.remove_provider(name)
+        await self._append(
+            Notice(f"已删除自定义 provider {name}。" if removed else f"{name} 不是自定义 provider，删不掉。",
+                   "info" if removed else "warn")
+        )
+
+    # -------------------------------------------------------------------- web
+    async def _handle_search_command(self, rest: str) -> None:
+        positional, flags = split_flags(rest)
+        action = positional[0].lower() if positional else ""
+
+        if action in {"backend", "provider"} and len(positional) > 1:
+            name = positional[1].lower()
+            if name not in SEARCH_PROVIDERS:
+                await self._append(
+                    Notice(f"未知搜索后端 '{name}'。可用：{', '.join(sorted(SEARCH_PROVIDERS))}", "warn")
+                )
+                return
+            preset = SEARCH_PROVIDERS[name]
+            self.config.search.provider = name
+            self.config.search.base_url = ""  # fall back to the preset endpoint
+            self.config.search.api_key_env = preset.api_key_env
+            self.config.save()
+            self.registry = build_registry(self.config.security, str(self.config.workdir), self.config.search)
+            await self._append(
+                Notice(f"搜索后端已切到 {name} · {preset.label}（已写回 config.toml）", "info")
+            )
+            return
+
+        if not rest.strip():
+            await self._append(
+                Notice(
+                    "联网搜索\n"
+                    f"  当前后端  {web.describe(self.config.search)}\n"
+                    "  用法      /search 关键词          直接搜一次\n"
+                    "            /search backend tavily 换后端（bocha 中文好、tavily 摘要干净）\n"
+                    "            /fetch example.com     打开网页读正文\n"
+                    "  会话里直接说「搜一下 xxx」，JARVIS 会自己调 web_search 工具。",
+                    "info",
+                )
+            )
+            return
+
+        query = " ".join(positional)
+        await self._append(Notice(f"🔍 搜索「{query}」（{self.config.search.provider}）…", "info"))
+        output = await self.registry.call(
+            "web_search", {"query": query, "max_results": self.config.search.max_results}
+        )
+        await self._append(Notice(output, "info"))
+
+    async def _fetch_page(self, url: str) -> None:
+        await self._append(Notice(f"🌐 抓取 {url} …", "info"))
+        output = await self.registry.call("fetch_url", {"url": url, "max_chars": 6000})
+        await self._append(Notice(output, "info"))
 
     async def _show_history(self) -> None:
         rows = self.store.sessions(15)
@@ -747,7 +1084,10 @@ class JarvisApp(App[None]):
                     "",
                     "SESSION",
                     f"模型   {model.display} · {model.model}",
+                    f"来源   {(model.provider or '自定义')} · {model.base_url.split('//')[-1][:26]}",
                     f"工具   {len(self.registry.tools)} 个",
+                    f"搜索   {self.config.search.provider}"
+                    + ("" if self.config.search.enabled else "（关闭）"),
                     f"上下文 {len(self.agent.history())} 条消息",
                     f"记忆   {self.store.fact_count()} 条事实",
                     f"计划   {len(self.agent.plan)} 步" + (" (执行中)" if self._busy else ""),
@@ -769,14 +1109,24 @@ def _selftest(ping: bool = False) -> int:
     config = load_config()
     print(f"config      : {config.path} (created={config.created})")
     print(f"default     : {config.default_model}")
-    registry = build_registry(config.security, str(config.workdir))
+    registry = build_registry(config.security, str(config.workdir), config.search)
     print(f"tools       : {', '.join(t.name for t in registry.tools)}")
     print(f"workdir     : {config.workdir}")
     print(
         f"memory      : auto_learn={config.memory.auto_learn} every={config.memory.learn_every} "
         f"max_in_prompt={config.memory.max_facts_in_prompt}"
     )
-    print(f"daemon      : hotkey={config.daemon.hotkey} scheduler={config.daemon.scheduler}")
+    print(f"daemon      : hotkey={config.daemon.hotkey} scheduler={config.daemon.scheduler} "
+          f"tray={config.daemon.tray}")
+    print(f"providers   : {len(config.catalog.presets)} 个内置 + "
+          f"{len(config.user_providers)} 个自定义；search={web.describe(config.search)}")
+    for name in config.model_names():
+        model = config.models[name]
+        print(
+            f"  model {name:<10} provider={model.provider or '-':<12} {model.model:<28} "
+            f"key={'yes' if model.key_ready else 'MISSING'}"
+        )
+    print(f"fallback    : {' → '.join(config.fallbacks_for(config.default_model)) or '(无)'}")
 
     print("--- sysinfo ---")
     print(sysinfo.sys_report(include_processes=3))

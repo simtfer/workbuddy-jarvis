@@ -79,15 +79,33 @@ class HelpScreen(ModalScreen[None]):
     """
 
     HELP_TEXT = """\
-JARVIS-Win · Phase 2
+JARVIS-Win · Phase 3
 
 对话
   直接输入问题，回车发送。JARVIS 会自行决定是否调用工具。
   Esc 中断正在生成的回答。
 
+模型与 Provider
+  /model                     列出模型（带序号 / provider / Key 状态）
+  /model 2                   按序号热切换（切换后上下文保留）
+  /model qwen                按名字切；主模型挂了会自动切到备用模型
+  /model add gpt --provider openai --model gpt-4o-mini --env OPENAI_API_KEY
+                             新增模型并写回 config.toml（加 --default 设为默认）
+  /model rm <名字>           删除模型
+  /model fallback qwen ollama  设置故障自动切换链
+  /provider list             列出全部内置 provider + 搜索后端
+  /provider add myvllm http://10.0.0.5:8000/v1 --env MYVLLM_KEY
+                             接入任意 OpenAI 兼容的自建端点
+  /provider info <名字>      看某个 provider 的详情
+
+联网
+  /search 关键词             直接搜一次（默认 DuckDuckGo，免 Key）
+  /search backend bocha      换搜索后端：bocha / tavily / serper / searxng
+  /fetch example.com         打开网页并抽出正文
+  也可以直接说「搜一下 xxx」，JARVIS 会自己调 web_search / fetch_url。
+
 基础命令
   /help            显示本帮助
-  /model [名字]    查看或切换模型（deepseek / qwen / doubao / ollama）
   /tools           列出可用工具
   /sys             立刻输出一份系统体检报告
   /history         查看已保存的历史会话
@@ -118,7 +136,9 @@ JARVIS-Win · Phase 2
 
 常驻模式
   另开一个终端运行：uv run jarvis --daemon
-  之后按 Ctrl+Alt+J 就能唤起 JARVIS 窗口（热键在 config.toml 的 daemon.hotkey 里改）。
+  · Ctrl+Alt+J 唤起 JARVIS 窗口（热键在 config.toml 的 daemon.hotkey 里改）
+  · 系统托盘出现 JARVIS 图标，右键可打开 / 看任务 / 退出
+  · 后台按点跑定时任务，跑完弹通知
 
 快捷键
   Ctrl+Q 退出    Ctrl+L 清屏    Ctrl+S 系统面板

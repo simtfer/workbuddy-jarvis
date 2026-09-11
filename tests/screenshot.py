@@ -14,7 +14,6 @@ from jarvis.tui.app import JarvisApp
 from jarvis.tui.widgets import (
     AssistantMessage,
     Notice,
-    PlanView,
     ToolCallView,
     ToolResultView,
     UserMessage,
@@ -22,49 +21,52 @@ from jarvis.tui.widgets import (
 
 OUT = Path(__file__).resolve().parents[1] / "docs" / "screenshot.svg"
 
-PLAN = [
-    {"title": "读取磁盘与分区信息", "detail": "sys_report + Get-Disk", "status": "done"},
-    {"title": "对比 C/D 盘余量", "detail": "算出使用率与可用空间", "status": "running"},
-    {"title": "给出结论与建议", "detail": "一句话总结", "status": "pending"},
-]
+QUERY = "搜一下今天 AI 领域有什么值得关注的动态"
+
+RESULTS = """\
+搜索「今天 AI 领域有什么值得关注的动态」（duckduckgo，4 条）：
+
+1. 国产大模型集体更新长上下文能力
+   https://example.com/llm-long-context
+   多家厂商同周发布 256K 以上上下文版本，价格战继续。
+2. 具身智能融资回暖，两家公司完成新一轮
+   https://example.com/embodied-funding
+   本轮资金主要用于数据采集工厂与仿真环境建设。
+3. AI 编程工具横向评测：补全准确率与仓库级重构
+   https://example.com/coding-tools-review
+   评测覆盖 6 款工具，仓库级重构仍是分水岭。
+4. 端侧推理框架发布 1.0
+   https://example.com/edge-inference
+   支持 NPU 量化，手机端 7B 模型延迟下降约四成。"""
 
 ANSWER = """\
-本机状态如下：
+今天 AI 领域值得关注的四条：
 
-| 项目 | 数值 |
+| 方向 | 动态 |
 |------|------|
-| CPU | 28.8% · 16 逻辑核 |
-| 内存 | 58.1% · 18.4 GB / 31.7 GB |
-| 磁盘 C: | 66% 已用，剩 65.4 GB |
+| 大模型 | 国产厂商集体更新长上下文，延续价格战 |
+| 具身智能 | 融资回暖，钱主要投在数据采集与仿真 |
+| 开发工具 | 编程助手评测更新，仓库级重构仍是分水岭 |
+| 端侧推理 | 推理框架 1.0 支持 NPU 量化，7B 模型延迟降约 40% |
 
-**结论**：内存占用偏高，主要是 `MemCompression`（1.7 GB）和几个 Node 进程。\
-要不要我看一下具体是哪些进程在吃内存？"""
+**跟你的关系**：第 3 条那篇评测直接对标你在做的工具链对比；\
+第 4 条如果落地，本地跑 Ollama 的体验会明显变好。要我把这篇评测的正文抓下来细看吗？"""
 
 
 async def main() -> None:
     app = JarvisApp(load_config())
-    async with app.run_test(size=(132, 38)) as pilot:
+    async with app.run_test(size=(132, 40)) as pilot:
         await pilot.pause()
 
-        await app._append(UserMessage("/plan 报告这台机器的磁盘占用情况"))
-        await app._append(Notice("正在为「报告这台机器的磁盘占用情况」制定计划…", "info"))
-        await app._append(PlanView("报告这台机器的磁盘占用情况", PLAN))
-        await app._append(Notice("共 3 步。执行：/do（逐步跑完）· 调整：/reset 后重新 /plan。", "info"))
-        await app._append(ToolCallView("sys_report", "include_processes=8"))
-        await app._append(
-            ToolResultView(
-                "sys_report",
-                "主机: tang · Windows 11\nCPU: 28.8% · 16 逻辑核\n内存: 58.1% · 18.4 GB / 31.7 GB",
-                True,
-            )
-        )
+        await app._append(UserMessage(QUERY))
+        await app._append(ToolCallView("web_search", 'query="今天 AI 领域有什么值得关注的动态", max_results=4'))
+        await app._append(ToolResultView("web_search", RESULTS, True))
         bubble = AssistantMessage()
         await app._append(bubble)
         await bubble.append_text(ANSWER)
-        await app._append(
-            Notice("沉淀了 1 条长期记忆：\n+ 报告磁盘时按 C 盘和 D 盘分两行简要说明，不要长篇大论。", "info")
-        )
-        await app._append(Notice("· 本次调用 1 个工具，用时 3.4s", "info"))
+
+        await app._append(Notice("▶ 模型  qwen  ·  deepseek 请求失败（429 额度用尽），已自动切换", "warn"))
+        await app._append(Notice("· 本次调用 1 个工具，用时 4.1s", "info"))
 
         await pilot.pause()
         OUT.parent.mkdir(parents=True, exist_ok=True)

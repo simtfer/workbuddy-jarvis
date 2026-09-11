@@ -11,7 +11,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from jarvis.config import load_config
+from jarvis.config import build_default_config, load_config
 from jarvis.core.agent import ConfirmRequest
 from jarvis.tui.app import JarvisApp
 from jarvis.tui.screens import ConfirmScreen
@@ -36,10 +36,18 @@ async def type_command(pilot, command: str) -> None:
     await pilot.pause()
 
 
+def isolated_config(tmpdir: str):
+    """A throwaway config.toml so commands that persist never touch the real one."""
+
+    path = Path(tmpdir) / "config.toml"
+    build_default_config().save(path)
+    return load_config(path)
+
+
 async def main() -> int:
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
         db = Path(tmpdir) / "smoke.db"
-        app = JarvisApp(load_config(), db_path=db)
+        app = JarvisApp(isolated_config(tmpdir), db_path=db)
 
         async with app.run_test(size=(120, 44)) as pilot:
             await pilot.pause()
@@ -48,9 +56,67 @@ async def main() -> int:
             check("应用启动并挂载界面", len(chat.children) >= 1)
             check("系统面板有内容", "CPU" in str(app.query_one("#syspanel").content))
             check("调度器已启动", app.scheduler is not None)
+            check("测试用的是临时配置", app.config.path.parent == db.parent)
 
             await type_command(pilot, "/tools")
             check("/tools 有输出", len(chat.children) >= 2)
+            check("网络搜索工具已注册", app.registry.get("web_search") is not None)
+            check("网页抓取工具已注册", app.registry.get("fetch_url") is not None)
+
+            # ------------------------------------------------- model & provider
+            await type_command(pilot, "/model")
+            check("/model 列出模型", len(chat.children) >= 2)
+
+            before = app.agent.model_key
+            await type_command(pilot, "/model 2")
+            switched = app.agent.model_key
+            check("按序号热切换模型", switched != before and switched in app.config.model_names())
+            check("切换后上下文保留", app.agent.messages[0]["role"] == "system")
+
+            await type_command(pilot, "/model 不存在")
+            check("未知模型被拦住并保持原模型", app.agent.model_key == switched)
+
+            await type_command(pilot, "/provider list")
+            check("/provider 列出后端", len(chat.children) >= 2)
+
+            await type_command(
+                pilot,
+                "/provider add myvllm http://10.0.0.9:8000/v1 --env MYVLLM_KEY --label 内网vLLM",
+            )
+            check("自定义 provider 写入配置", "myvllm" in app.config.user_providers)
+            check("provider 落盘到临时配置", "myvllm" in app.config.path.read_text(encoding="utf-8"))
+
+            await type_command(pilot, "/model add nei --provider myvllm --model qwen3-32b")
+            check("自定义模型可用", "nei" in app.config.model_names())
+            check("自定义模型继承 base_url", app.config.model("nei").base_url == "http://10.0.0.9:8000/v1")
+
+            await type_command(pilot, "/model nei")
+            check("切到内网模型", app.agent.model_key == "nei")
+            check("内网模型不算缺 Key", app.config.model("nei").key_ready is True)
+
+            await type_command(pilot, "/model fallback deepseek nei")
+            check("fallback 链可写", app.config.fallback_models == ["deepseek", "nei"])
+
+            await type_command(pilot, "/model rm nei")
+            check("在用中的模型不能删", "nei" in app.config.model_names())
+
+            await type_command(pilot, "/model deepseek")
+            await type_command(pilot, "/model rm nei")
+            check("切走后模型可删除", "nei" not in app.config.model_names())
+
+            await type_command(pilot, "/provider rm myvllm")
+            check("provider 可删除", "myvllm" not in app.config.user_providers)
+
+            await type_command(pilot, "/search backend searxng")
+            check("搜索后端可切换", app.config.search.provider == "searxng")
+            check("搜索后端落盘", "searxng" in app.config.path.read_text(encoding="utf-8"))
+            await type_command(pilot, "/search backend 不存在的后端")
+            check("未知搜索后端被拦住", app.config.search.provider == "searxng")
+
+            await type_command(pilot, "/search")
+            check("/search 无参数给用法", len(chat.children) >= 2)
+            await type_command(pilot, "/search backend duckduckgo")
+            check("搜索后端切回 duckduckgo", app.config.search.provider == "duckduckgo")
 
             # ---------------------------------------------------------- memory
             await type_command(pilot, "/facts")
