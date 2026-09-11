@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import platform
 from datetime import datetime
 
@@ -30,15 +31,55 @@ SYSTEM_PROMPT = """\
 - 不确定的事情就说不确定。
 """
 
+PLANNER_PROMPT = """\
+你是任务规划器。把用户的任务拆成 3-8 个可独立执行、有明确产出的步骤。
 
-def system_prompt() -> str:
-    """Build the system prompt with live environment facts."""
+要求：
+- 每一步都是可以单独执行并验证结果的动作，不要写"思考一下"这种空步。
+- 涉及本机操作时，写清楚预期用什么工具/命令、拿到什么信息。
+- 只输出 JSON，不要任何解释文字，格式如下：
+
+{"goal": "一句话目标", "steps": [{"title": "步骤标题", "detail": "具体怎么做、预期产出"}]}
+"""
+
+LEARN_PROMPT = """\
+你是记忆整理器。从下面这段对话里提炼**值得长期记住**的事实。
+
+只保留这几类：
+- 用户的偏好、习惯、明确要求（例如"我喜欢用 PowerShell 而不是 cmd"）
+- 项目/环境的稳定事实（路径、技术栈、约定、机器配置）
+- 已确定的决策与结论
+
+不要保留：寒暄、一次性查询结果、随时间变化的数据（CPU 占用、当前时间）、
+疑问句，以及任何你不确定的内容。
+
+输出 JSON 数组，元素是字符串；没有值得记住的内容就输出 []。不要任何解释。
+"""
+
+
+def system_prompt(facts: list[str] | None = None, extra: str = "") -> str:
+    """Build the system prompt with live environment facts and long-term memory."""
 
     now = datetime.now()
+    home = os.path.expanduser("~")
     env = [
         f"操作系统：Windows（{platform.machine()}）",
         f"Python：{platform.python_version()}",
-        f"当前时间：{now:%Y-%m-%d %H:%M:%S}（{'一二三四五六日'[now.weekday()]}）",
-        f"用户主目录：{platform.home if hasattr(platform, 'home') else ''}",
+        f"当前时间：{now:%Y-%m-%d %H:%M:%S}（周{'一二三四五六日'[now.weekday()]}）",
+        f"用户主目录：{home}",
     ]
-    return SYSTEM_PROMPT + "\n# 当前环境\n" + "\n".join(f"- {line}" for line in env if line.split("：", 1)[-1])
+    parts = [SYSTEM_PROMPT, "\n# 当前环境\n" + "\n".join(f"- {line}" for line in env)]
+
+    if facts:
+        parts.append(
+            "\n# 关于这位用户的长期记忆\n"
+            "（这些是过往对话沉淀的事实，直接当作已知条件使用，不要重复询问。）\n"
+            + "\n".join(f"- {fact}" for fact in facts)
+        )
+    if extra:
+        parts.append("\n# 本次会话的额外要求\n" + extra)
+    return "\n".join(parts)
+
+
+def plan_request(task: str) -> str:
+    return f"请为下面的任务制定执行计划：\n\n{task}"

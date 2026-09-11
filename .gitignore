@@ -12,3 +12,4 @@ wheels/
 # JARVIS runtime
 config.toml
 data/
+*.log

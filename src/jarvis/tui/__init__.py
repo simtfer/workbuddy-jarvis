@@ -1,5 +1,5 @@
 """Textual user interface."""
 
-from .app import JarvisApp, main
+from .app import JarvisApp, _selftest
 
-__all__ = ["JarvisApp", "main"]
+__all__ = ["JarvisApp", "_selftest"]

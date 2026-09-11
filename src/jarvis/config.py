@@ -71,6 +71,24 @@ max_tool_output = 6000
 history_limit = 30
 # Default working directory for shell tools; empty = project root.
 workdir = ""
+
+# ---------------------------- long-term memory ------------------------------
+[memory]
+# Let JARVIS distil durable facts (preferences, project conventions) by itself.
+auto_learn = true
+# Run the extraction pass every N completed turns.
+learn_every = 3
+# How many facts to inject into the system prompt.
+max_facts_in_prompt = 20
+
+# ------------------------------- daemon -------------------------------------
+[daemon]
+# Global hotkey that opens a JARVIS window (jarvis --daemon must be running).
+hotkey = "ctrl+alt+j"
+# Let the daemon / TUI fire scheduled tasks.
+scheduler = true
+# Windows toast notifications.
+notify = true
 """
 
 
@@ -112,10 +130,30 @@ class SecurityConfig:
 
 
 @dataclass
+class MemoryConfig:
+    """Long-term memory behaviour."""
+
+    auto_learn: bool = True
+    learn_every: int = 3
+    max_facts_in_prompt: int = 20
+
+
+@dataclass
+class DaemonConfig:
+    """Resident-process behaviour: hotkey, scheduler, notifications."""
+
+    hotkey: str = "ctrl+alt+j"
+    scheduler: bool = True
+    notify: bool = True
+
+
+@dataclass
 class Config:
     default_model: str
     models: dict[str, ModelConfig]
     security: SecurityConfig
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
+    daemon: DaemonConfig = field(default_factory=DaemonConfig)
     path: Path = CONFIG_PATH
     created: bool = False
 
@@ -160,7 +198,28 @@ def _parse(raw: dict) -> Config:
     )
 
     default_model = str(raw.get("default_model") or (next(iter(models)) if models else "deepseek"))
-    return Config(default_model=default_model, models=models, security=security)
+
+    mem_raw = raw.get("memory") or {}
+    memory = MemoryConfig(
+        auto_learn=bool(mem_raw.get("auto_learn", True)),
+        learn_every=max(1, int(mem_raw.get("learn_every", 3))),
+        max_facts_in_prompt=int(mem_raw.get("max_facts_in_prompt", 20)),
+    )
+
+    daemon_raw = raw.get("daemon") or {}
+    daemon = DaemonConfig(
+        hotkey=str(daemon_raw.get("hotkey", "ctrl+alt+j")),
+        scheduler=bool(daemon_raw.get("scheduler", True)),
+        notify=bool(daemon_raw.get("notify", True)),
+    )
+
+    return Config(
+        default_model=default_model,
+        models=models,
+        security=security,
+        memory=memory,
+        daemon=daemon,
+    )
 
 
 def load_config(path: Path | None = None) -> Config:

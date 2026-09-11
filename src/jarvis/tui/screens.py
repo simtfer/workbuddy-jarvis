@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Literal
 
 from textual.app import ComposeResult
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
@@ -72,42 +72,67 @@ class HelpScreen(ModalScreen[None]):
     CSS = """
     HelpScreen { align: center middle; }
     #help-box {
-        width: 80%; max-width: 110; height: auto;
+        width: 80%; max-width: 110; height: 85%;
         border: round $accent; background: $surface; padding: 1 2;
     }
     #help-body { color: $text; }
     """
 
     HELP_TEXT = """\
-JARVIS-Win · Phase 1
+JARVIS-Win · Phase 2
 
 对话
   直接输入问题，回车发送。JARVIS 会自行决定是否调用工具。
   Esc 中断正在生成的回答。
 
-斜杠命令
+基础命令
   /help            显示本帮助
   /model [名字]    查看或切换模型（deepseek / qwen / doubao / ollama）
   /tools           列出可用工具
   /sys             立刻输出一份系统体检报告
   /history         查看已保存的历史会话
+  /resume <id>     载入某个历史会话作为上下文
   /reset           清空当前对话上下文（历史仍保存在 data/ 中）
   /clear           清空屏幕
   /theme           切换深浅主题
   /quit            退出
 
+长期记忆
+  /facts                 查看已沉淀的事实
+  /remember <内容>       手动记住一条（例如「我习惯用 PowerShell」）
+  /forget <编号>         删除某条记忆
+  /learn                 立刻从最近对话里提炼记忆
+
+计划模式
+  /plan <任务>     让模型拆成 3-8 步计划
+  /do              按当前计划逐步执行（每步都会显示进度）
+  /auto <任务>     生成计划后立刻执行
+
+定时任务
+  /task list                       查看任务（F2 同效）
+  /task add <内容> @every 30m      每 30 分钟跑一次
+  /task add <内容> @daily 09:00    每天 09:00 跑
+  /task add <内容> @once 2026-09-12 08:00
+  /task add <内容> @daily 09:00 --danger   允许该任务执行写操作
+  /task on|off <id> · /task rm <id> · /task run <id>
+
+常驻模式
+  另开一个终端运行：uv run jarvis --daemon
+  之后按 Ctrl+Alt+J 就能唤起 JARVIS 窗口（热键在 config.toml 的 daemon.hotkey 里改）。
+
 快捷键
-  Ctrl+Q 退出    Ctrl+L 清屏    Ctrl+S 显示/隐藏系统面板
-  F1 帮助        Ctrl+X 取消当前任务
+  Ctrl+Q 退出    Ctrl+L 清屏    Ctrl+S 系统面板
+  F1 帮助        F2 任务列表    Ctrl+X 取消当前任务
 
 安全
   执行命令、写文件等破坏性操作都会弹窗确认；
-  在 config.toml 的 security.auto_approve 里可加白名单（谨慎使用）。
+  定时任务默认拒绝危险操作，除非创建时加了 --danger。
 """
 
     def compose(self) -> ComposeResult:
         with Vertical(id="help-box"):
-            yield Static(self.HELP_TEXT, id="help-body", markup=False)
+            with VerticalScroll(id="help-body"):
+                yield Static(self.HELP_TEXT, markup=False)
 
     def action_close(self) -> None:
         self.dismiss(None)
