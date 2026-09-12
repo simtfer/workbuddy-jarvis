@@ -6,6 +6,7 @@ from functools import partial
 
 from ..config import SearchConfig, SecurityConfig
 from ..core.registry import Tool, ToolRegistry
+from ..core.subagent import SUBAGENT_TOOL_NAME
 from . import clipboard, fs, procman, shell, sysinfo, web
 
 
@@ -297,7 +298,68 @@ def build_registry(
         )
     )
 
+    # ----------------------------------------------------------- sub-agents
+    # The body is intercepted by ``Agent.run`` - this stub only exists so the
+    # tool appears in the LLM's schema and gets the right description.
+    def _delegate_subagents_stub(**_: object) -> str:
+        return "[错误] delegate_subagents 必须在 Agent.run 拦截下调用。"
+
+    registry.register(
+        Tool(
+            name=SUBAGENT_TOOL_NAME,
+            description=(
+                "把多个互不依赖的子任务**并行**投给子 Agent（每个子 Agent 独立对话，"
+                "共享工具与记忆库）。适合：并行搜索 / 并行读多个文件 / 并行跑多个独立实验。"
+                "不适合：步骤之间有依赖、必须串行的任务。"
+                "当用户的问题天然可拆成 N 个互不依赖的子任务、或希望多件事一起做时使用。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "prompts": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "要并行执行的任务列表。每个字符串是一个独立的子 Agent 提示。"
+                            f"数量受 Config.subagents.max_per_call 限制。"
+                        ),
+                    },
+                },
+                "required": ["prompts"],
+            },
+            func=_delegate_subagents_stub,
+            dangerous=False,
+        )
+    )
+
     return registry
+
+
+def register_subagent_tool(registry: ToolRegistry) -> None:
+    """Re-register the delegate_subagents tool against an existing registry.
+
+    Used by tests that build their own registry and do not want the rest of the
+    plugin set wired up.
+    """
+
+    registry.register(
+        Tool(
+            name=SUBAGENT_TOOL_NAME,
+            description="把多个互不依赖的子任务并行投给子 Agent。",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "prompts": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "要并行执行的子任务提示列表。",
+                    },
+                },
+                "required": ["prompts"],
+            },
+            func=lambda **_: "[错误] delegate_subagents 必须在 Agent.run 拦截下调用。",
+        )
+    )
 
 
 def _list_dir(workdir: str, path: str = "", show_hidden: bool = False) -> str:

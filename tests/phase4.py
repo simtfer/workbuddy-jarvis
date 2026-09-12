@@ -62,7 +62,7 @@ def test_registry() -> None:
     names = [tool.name for tool in registry.tools]
     check("新工具全部注册", all(name in names for name in NEW_TOOLS),
           ",".join(n for n in names if n not in NEW_TOOLS))
-    check("工具总数为 15", len(names) == 15, str(len(names)))
+    check("工具总数为 16", len(names) == 16, str(len(names)))
 
     for name in ("read_clipboard", "list_processes", "process_info"):
         check(f"{name} 免确认", not registry.needs_confirmation(registry.get(name)))  # type: ignore[arg-type]

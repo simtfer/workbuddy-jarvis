@@ -205,6 +205,13 @@ JARVIS-Win · Phase 4
   /task add <内容> @daily 09:00 --danger   允许该任务执行写操作
   /task on|off <id> · /task rm <id> · /task run <id>
 
+多任务与并发
+  主 Agent 会在用户的问题天然可拆成 N 个互不依赖子任务时，自动调用
+  delegate_subagents 并行派给子 Agent（每个独立对话、共享工具与数据库）。
+  超时（默认 30s）后先把已完成的部分输出，剩下的继续跑完再追加最终汇总。
+  配置在 config.toml 的 [subagents]：default_timeout / max_runtime /
+  max_concurrent / max_per_call。
+
 常驻模式
   另开一个终端运行：uv run jarvis --daemon
   · Ctrl+Alt+J 唤起 JARVIS 窗口（热键在 config.toml 的 daemon.hotkey 里改）

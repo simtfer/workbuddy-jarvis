@@ -413,6 +413,54 @@ class JarvisApp(App[None]):
             await self._append(
                 Notice(f"计划执行结束：{event['done']}/{event['total']} 步成功。", "info")
             )
+        elif kind == "subagent_start":
+            prompts = event.get("prompts") or []
+            preview = " · ".join(p[:30] for p in prompts[:5])
+            if len(prompts) > 5:
+                preview += f" … 等 {len(prompts)} 个"
+            await self._append(
+                Notice(f"→ 派发了 {event['count']} 个子任务：{preview}", "info")
+            )
+        elif kind == "subagent_done":
+            status = event.get("status", "done")
+            mark = {"done": "✓", "error": "✗", "timeout": "⏱"}.get(status, "·")
+            tools = event.get("tool_count", 0)
+            elapsed = event.get("elapsed", 0.0)
+            await self._append(
+                Notice(
+                    f"{mark} 子任务 #{event['index'] + 1} {status} · "
+                    f"{tools} 工具 · {elapsed:.1f}s",
+                    "info" if status == "done" else ("warn" if status == "timeout" else "bad"),
+                )
+            )
+        elif kind == "subagent_timeout":
+            results = event.get("results") or []
+            finished = sum(1 for r in results if r["status"] == "done")
+            running = [r["index"] + 1 for r in results if r["status"] not in ("done", "error")]
+            timeout = event.get("default_timeout", 0)
+            await self._append(
+                Notice(
+                    f"⏱ 默认超时 {timeout:.0f}s：已完成 {finished}/{len(results)}，"
+                    f"仍在跑：{', '.join('#' + str(i) for i in running) or '无'}。"
+                    f"  先把已有结果继续推进，剩下的完成后会自动追加最终汇总。",
+                    "warn",
+                )
+            )
+        elif kind == "subagent_final":
+            results = event.get("results") or []
+            finished = sum(1 for r in results if r["status"] == "done")
+            failed = sum(1 for r in results if r["status"] == "error")
+            await self._append(
+                Notice(
+                    f"🏁 子任务全部结束：{finished} 成功"
+                    + (f" · {failed} 失败" if failed else "")
+                    + "。",
+                    "info" if not failed else "warn",
+                )
+            )
+        elif kind == "subagent_summary":
+            # Rendered as part of the tool_result that follows.
+            pass
         elif kind == "error":
             self._stream_widget = None
             await self._append(Notice(event["message"], "bad"))

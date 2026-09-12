@@ -356,6 +356,55 @@ async def main() -> int:
             await pilot.pause()
             check("步骤进入 done", "✓" in str(plan_view.content))
 
+            # ------------------------------------------------- subagent events
+            chat = app.query_one("#chat")
+            before = len(chat.children)
+            await app._handle_event({
+                "type": "subagent_start",
+                "count": 3,
+                "prompts": ["research A", "research B", "research C"],
+            })
+            await pilot.pause()
+            check("subagent_start 渲染派发通知",
+                  any("派发了 3 个子任务" in str(getattr(c, "content", "")) for c in chat.children[before:]),
+                  str(len(chat.children) - before))
+
+            await app._handle_event({
+                "type": "subagent_done",
+                "index": 0,
+                "status": "done",
+                "tool_count": 2,
+                "elapsed": 1.5,
+            })
+            await pilot.pause()
+            check("subagent_done 渲染完成标记",
+                  any("✓" in str(getattr(c, "content", "")) and "子任务" in str(getattr(c, "content", ""))
+                      for c in chat.children))
+
+            await app._handle_event({
+                "type": "subagent_timeout",
+                "results": [
+                    {"index": 0, "prompt": "a", "status": "done"},
+                    {"index": 1, "prompt": "b", "status": "running"},
+                ],
+                "default_timeout": 30.0,
+            })
+            await pilot.pause()
+            check("subagent_timeout 触发部分提示",
+                  any("默认超时" in str(getattr(c, "content", "")) for c in chat.children))
+
+            await app._handle_event({
+                "type": "subagent_final",
+                "results": [
+                    {"index": 0, "prompt": "a", "status": "done"},
+                    {"index": 1, "prompt": "b", "status": "done"},
+                ],
+            })
+            await pilot.pause()
+            check("subagent_final 渲染汇总",
+                  any("🏁" in str(getattr(c, "content", "")) and "全部结束" in str(getattr(c, "content", ""))
+                      for c in chat.children))
+
             # ------------------------------------------------------- modals etc.
             request = ConfirmRequest(tool="run_shell", arguments={"command": "echo hi"}, hint="test")
             answer = asyncio.ensure_future(app._confirm(request))

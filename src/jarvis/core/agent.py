@@ -19,6 +19,7 @@ from ..llm.client import LLMClient, LLMError, StreamResult
 from .planner import PlanStep, extract_json, parse_plan, step_instruction
 from .prompts import LEARN_PROMPT, PLANNER_PROMPT, plan_request, system_prompt
 from .registry import Tool, ToolRegistry
+from .subagent import SUBAGENT_TOOL_NAME, SubAgentManager
 
 _QUEUE_END = object()
 
@@ -84,11 +85,13 @@ class Agent:
     _client: LLMClient | None = None
     _client_model: str | None = None
     _last_result: StreamResult | None = None
+    _subagents: SubAgentManager | None = None
 
     def __post_init__(self) -> None:
         if self.client_factory is None:
             self.client_factory = LLMClient
         self.reset()
+        self._subagents = SubAgentManager(self)
 
     # --------------------------------------------------------------- lifecycle
     def facts(self) -> list[str]:
@@ -242,6 +245,29 @@ class Agent:
                 tool = self.registry.get(call.name)
                 arguments = self._parse_arguments(call.arguments)
                 output: str
+
+                if call.name == SUBAGENT_TOOL_NAME:
+                    # Hand the call to the manager. It yields its own lifecycle
+                    # events; we forward them and capture the final summary to
+                    # use as the tool result.
+                    prompts = arguments.get("prompts") if isinstance(arguments, dict) else None
+                    error = self._subagents.validate(prompts) if self._subagents else "subagents 未初始化"
+                    if error:
+                        output = f"[错误] {error}"
+                        yield {"type": "tool_result", "name": call.name, "output": output, "ok": False}
+                    else:
+                        output = ""
+                        assert self._subagents is not None
+                        async for sub_event in self._subagents.run(prompts):
+                            sub_kind = sub_event.get("type")
+                            yield {"type": sub_kind, **{
+                                k: v for k, v in sub_event.items() if k != "type"
+                            }}
+                            if sub_kind == "subagent_summary":
+                                output = sub_event["text"]
+                        yield {"type": "tool_result", "name": call.name, "output": output, "ok": True}
+                    self._remember({"role": "tool", "tool_call_id": call.id, "content": output})
+                    continue
 
                 if tool is None:
                     output = f"[错误] 不存在名为 {call.name} 的工具。"

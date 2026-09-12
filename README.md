@@ -7,6 +7,7 @@
 - **Phase 3**：自定义 provider（含内网/自建端点）、多模型热切换与故障自动切换、联网搜索与网页抓取、系统托盘图标
 - **Phase 4**：剪贴板读写（纯 ctypes，零依赖）、进程管理（列表 / 详情 / 结束 / 挂起恢复）；顺带修掉了 psutil 并发与系统面板卡界面的隐患，并把横幅与侧栏改成按终端「格」对齐
 - **界面**：左侧命令菜单（`Ctrl+B`）+ 右侧系统面板（`Ctrl+S`），两侧栏默认收起，键盘可全程操作
+- **Phase 5**：并行子任务。主 Agent 把可拆的 N 个子任务交给 `delegate_subagents`，子 Agent 独立对话、共享工具与数据；超时（默认 30s）后先把已完成的部分输出，剩下的继续跑完再追加最终汇总
 
 ## 快速开始
 
@@ -161,6 +162,38 @@ api_key = "sk-xxxx"          # 也可以换成 api_key_env = "MYAPI_KEY"
   （注释与字段顺序会变），但只写出你实际设置过的字段，语义不变。手写后建议用 `/provider list` 和 `/model`
   确认读到了。
 
+### 并行子任务
+
+主 Agent 在系统提示里被教了：当用户的问题天然可拆成 N 个**互不依赖**的子任务时，调
+`delegate_subagents(prompts=[...])` 一次派给多个子 Agent 并行执行。每个子 Agent
+独立对话、独立 LLM 连接池，但**共享** Config / ToolRegistry / 数据库（`/remember`
+之类会写入同一个 `data/jarvis.db`）。子 Agent 走和主 Agent 同样的工具，**但**
+危险工具会被一个内置的「总是拒绝」confirm handler 拦住，不会阻塞主对话。
+
+**典型场景**：并行搜索多组关键词、并行抓多个 URL、同时读 / 总结多份文件、并行跑多个
+独立实验；任何「A、B、C 一起做」的请求。
+
+**两阶段输出**（在 TUI 里看得最清楚）：
+1. 派发后立刻显示 `→ 派发了 N 个子任务：…`。
+2. 每个子 Agent 完成时显示 `✓ 子任务 #i done · X 工具 · Y.Ys`（或 `✗` / `⏱`）。
+3. 跑满 `Config.subagents.default_timeout`（默认 30 秒）时立刻输出**部分快照**：
+   `⏱ 默认超时 30s：已完成 X/N，仍在跑：#i、#j。先把已有结果继续推进，剩下的完成后
+   会自动追加最终汇总。` —— 主 Agent **不会**被这里打断，它仍在等真正的最终结果。
+4. 所有子 Agent 都落地后输出 `🏁 子任务全部结束：…`，并把完整汇总作为工具结果喂给
+   主 Agent；主 Agent 据此做最终综合回答。
+
+**配置**（`config.toml` 的 `[subagents]`）：
+
+| 字段 | 默认 | 含义 |
+|---|---|---|
+| `default_timeout` | 30.0 | 触发「部分快照」的秒数（仅影响 UX，不取消子 Agent） |
+| `max_runtime` | 600.0 | 单个子 Agent 的绝对最长用时，超过会被中止 |
+| `max_concurrent` | 4 | 同时在跑的子 Agent 上限（asyncio 信号量） |
+| `max_per_call` | 8 | 一次 `delegate_subagents` 调用允许的最多的 prompt 数 |
+
+子 Agent 跑出来的工具调用和记忆写入都会进主数据库——它们之间是真正「在干同一个项目的
+一队人」，不是相互隔离的沙箱。
+
 ### 联网搜索
 
 ```text
@@ -200,6 +233,11 @@ api_key = "sk-xxxx"          # 也可以换成 api_key_env = "MYAPI_KEY"
 **结束和挂起都会弹窗确认**，并且有一层硬拦截：`System` / `smss` / `csrss` / `lsass` / `services` / `winlogon`
 等系统关键进程，以及 JARVIS 自己所在的进程链，一律拒绝——不依赖模型自觉。
 列表里的 CPU% 已按逻辑核数归一化，和任务管理器口径一致。
+
+### 并行子任务
+
+模型自动按需调用 `delegate_subagents(prompts=[...])`。详见
+[并行子任务](#并行子任务) 段。
 
 ### 长期记忆
 
@@ -266,7 +304,7 @@ TUI (Textual)  →  Agent 内核  →  工具层  →  LLM 适配 / 记忆
 ```
 
 - `src/jarvis/tui/` — 界面：聊天流、左侧命令菜单、系统面板、确认弹窗、帮助面板、计划面板
-- `src/jarvis/core/` — `agent.py` 对话循环（流式 + 工具调度 + 计划执行 + 记忆提炼 + 故障切换）、`registry.py` 工具注册与截断、`planner.py` 计划解析、`scheduler.py` 调度与下次执行时间计算、`prompts.py` 人设与系统提示
+- `src/jarvis/core/` — `agent.py` 对话循环（流式 + 工具调度 + 计划执行 + 记忆提炼 + 故障切换 + delegate_subagents 拦截）、`registry.py` 工具注册与截断、`planner.py` 计划解析、`scheduler.py` 调度与下次执行时间计算、`prompts.py` 人设与系统提示、`subagent.py` SubAgentManager（并发执行 + 部分/最终双输出）
 - `src/jarvis/llm/` — 仅依赖 OpenAI 兼容协议；端点不支持 tools 时自动降级为纯对话
 - `src/jarvis/providers.py` — 内置 provider / 搜索后端预设目录 + base_url 反查
 - `src/jarvis/tomlwrite.py` — 最小 TOML 序列化（配置可写回）
@@ -308,7 +346,8 @@ TUI (Textual)  →  Agent 内核  →  工具层  →  LLM 适配 / 记忆
 uv run python -u tests/phase2.py        # 计划/记忆/调度/热键（无网络，含真实热键注册）
 uv run python -u tests/phase3.py        # provider 目录/配置读写/热切换/搜索解析/托盘结构（无网络）
 uv run python -u tests/phase4.py        # 剪贴板往返（自动备份还原）+ 进程列表/详情/护栏/真实杀进程（无网络）
-uv run python -u tests/smoke_tui.py     # 无头 TUI：命令、模型切换、provider 增删、任务、计划面板、弹窗
+uv run python -u tests/phase5.py        # 并行子任务：manager 事件序列 / max_concurrent / 校验 / 端到端 Agent.run（无网络）
+uv run python -u tests/smoke_tui.py     # 无头 TUI：命令、模型切换、provider 增删、任务、计划面板、子任务事件、弹窗
 uv run python -u tests/daemon_check.py  # 守护进程：真实启动 + 热键注册 + 真实按键触发 + pid 防重
 uv run python -u tests/tray_check.py    # 真实托盘：加入通知区、点击回调、气泡通知、任务栏重启后重挂
 uv run python -u tests/live_agent.py    # 真实模型 + 真实工具端到端（需要 API Key）
@@ -317,7 +356,7 @@ uv run python -u tests/live_phase3.py   # 真实联网搜索 + 真实网页抓�
 uv run python -u tests/screenshot.py    # 导出 docs/screenshot.svg 界面快照
 ```
 
-离线测试（phase2 / phase3 / phase4 / smoke_tui）不需要网络也不需要 API Key，全程用临时数据库与临时配置，
+离线测试（phase2 / phase3 / phase4 / phase5 / smoke_tui）不需要网络也不需要 API Key，全程用临时数据库与临时配置，
 不会动你的 `data/` 和 `config.toml`。`phase4.py` 会临时用一下系统剪贴板，但会先备份原内容并在结束时还原
 （若剪贴板里有图片或文件列表这类无法还原的内容，则自动跳过写入测试）。
 

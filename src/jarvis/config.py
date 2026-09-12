@@ -193,6 +193,23 @@ class DaemonConfig:
 
 
 @dataclass
+class SubAgentConfig:
+    """Settings for ``delegate_subagents``: how the main agent farms out work.
+
+    ``default_timeout`` is the wall-clock budget after which the manager surfaces a
+    partial snapshot to the UI; it does *not* cancel the still-running sub-agents -
+    they keep going until ``max_runtime`` (or they finish naturally), and the final
+    summary arrives when they are all back. The point is to keep the chat moving:
+    the user gets something to read while the slowest task is still cooking.
+    """
+
+    default_timeout: float = 30.0   # seconds before partial output (UI only)
+    max_runtime: float = 600.0      # absolute cap per sub-agent (model call + tools)
+    max_concurrent: int = 4         # asyncio semaphore; >=1
+    max_per_call: int = 8           # max prompts in one delegate_subagents call
+
+
+@dataclass
 class Config:
     default_model: str
     models: dict[str, ModelConfig]
@@ -200,6 +217,7 @@ class Config:
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     daemon: DaemonConfig = field(default_factory=DaemonConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
+    subagents: SubAgentConfig = field(default_factory=SubAgentConfig)
     fallback_models: list[str] = field(default_factory=list)
     user_providers: dict[str, dict[str, str]] = field(default_factory=dict)
     path: Path = CONFIG_PATH
@@ -565,6 +583,17 @@ def _render_tail(config: "Config") -> str:
         "# 常驻时显示系统托盘图标（右键菜单：打开 / 任务 / 状态 / 退出）。",
         f"tray = {_bool(daemon.tray)}",
         f'tray_tooltip = "{daemon.tray_tooltip}"',
+        "",
+        "# ------------------------------- subagents --------------------------------",
+        "[subagents]",
+        "# 默认超时（秒）：超时后把已完成的部分先输出给用户，剩下的继续跑完再追加最终汇总。",
+        f"default_timeout = {config.subagents.default_timeout}",
+        "# 单个子 Agent 的绝对最长用时（秒）。",
+        f"max_runtime = {config.subagents.max_runtime}",
+        "# 同时在跑的子 Agent 数量上限（信号量）。",
+        f"max_concurrent = {config.subagents.max_concurrent}",
+        "# 一次 delegate_subagents 调用允许的最多 prompt 数。",
+        f"max_per_call = {config.subagents.max_per_call}",
     ]
     return "\n".join(parts) + "\n"
 
@@ -656,6 +685,13 @@ def _parse(raw: dict) -> Config:
         tray=bool(daemon_raw.get("tray", True)),
         tray_tooltip=str(daemon_raw.get("tray_tooltip", "JARVIS-Win · AI 助手")),
     )
+    sub_raw = raw.get("subagents") or {}
+    subagents = SubAgentConfig(
+        default_timeout=float(sub_raw.get("default_timeout", 30.0)),
+        max_runtime=float(sub_raw.get("max_runtime", 600.0)),
+        max_concurrent=max(1, int(sub_raw.get("max_concurrent", 4))),
+        max_per_call=max(1, int(sub_raw.get("max_per_call", 8))),
+    )
 
     return Config(
         default_model=default_model,
@@ -664,6 +700,7 @@ def _parse(raw: dict) -> Config:
         memory=memory,
         daemon=daemon,
         search=_parse_search(raw.get("search") or {}),
+        subagents=subagents,
         fallback_models=[str(m) for m in (raw.get("fallback_models") or [])],
         user_providers=user_providers,
     )
