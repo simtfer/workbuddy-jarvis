@@ -15,7 +15,7 @@ from jarvis import textwidth
 from jarvis.config import build_default_config, load_config
 from jarvis.core.agent import ConfirmRequest
 from jarvis.tui.app import JarvisApp
-from jarvis.tui.screens import ConfirmScreen
+from jarvis.tui.screens import ConfirmScreen, ModelPickerScreen
 
 # Dump every thread's stack if the test wedges, so a hang is never a mystery.
 # The budget is generous because each command waits for the app to look idle,
@@ -58,6 +58,13 @@ async def main() -> int:
             chat = app.query_one("#chat")
             check("应用启动并挂载界面", len(chat.children) >= 1)
             check("系统面板有内容", "CPU" in str(app.query_one("#syspanel").content))
+            # The chat pane is a focusable scroll container, so the caret must be
+            # placed in the prompt explicitly or typing goes nowhere.
+            check(
+                "启动即聚焦输入框",
+                getattr(app.focused, "id", None) == "prompt",
+                str(getattr(app.focused, "id", None) or type(app.focused).__name__),
+            )
 
             # The sidebar must never wrap: a line one cell past the box turns the
             # column layout into the ragged mess this test exists to prevent.
@@ -100,14 +107,52 @@ async def main() -> int:
             check("/clip 未知子命令给用法", "用法" in last, last.splitlines()[0][:50])
 
             # ------------------------------------------------- model & provider
-            await type_command(pilot, "/model")
-            check("/model 列出模型", len(chat.children) >= 2)
+            # A bare /model opens the arrow-key picker; /model list prints the table.
+            await type_command(pilot, "/model list")
+            check("/model list 打印模型表", "模型列表" in str(chat.children[-1].content))
 
+            await type_command(pilot, "/model")
+            check("/model 打开交互式选择器", isinstance(app.screen, ModelPickerScreen))
+            if isinstance(app.screen, ModelPickerScreen):
+                listing = app.screen.query_one("#picker-list")
+                start = listing.highlighted
+                check("选择器默认高亮当前模型",
+                      app.screen.choices[start][0] == app.agent.model_key, str(start))
+                await pilot.press("down")
+                await pilot.pause()
+                moved = listing.highlighted
+                check("↑↓ 能移动高亮", moved == start + 1, f"{start} -> {moved}")
+                target = app.screen.choices[moved][0]
+                keep = app.agent.model_key
+                await pilot.press("escape")
+                await pilot.pause()
+                await pilot.pause()
+                check("Esc 关掉选择器且不切换",
+                      not isinstance(app.screen, ModelPickerScreen) and app.agent.model_key == keep)
+                check("关掉选择器后焦点回到输入框",
+                      getattr(app.focused, "id", None) == "prompt",
+                      str(getattr(app.focused, "id", None)))
+
+                await type_command(pilot, "/model")
+                await pilot.press("down")
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause()
+                await pilot.pause()
+                check("Enter 按高亮项切换模型", app.agent.model_key == target,
+                      f"{app.agent.model_key} / 期望 {target}")
+                check("选择器用完自动关闭", not isinstance(app.screen, ModelPickerScreen))
+
+            # Park on the first model so "/model 2" is guaranteed to be a change.
+            await type_command(pilot, "/model 1")
             before = app.agent.model_key
             await type_command(pilot, "/model 2")
             switched = app.agent.model_key
             check("按序号热切换模型", switched != before and switched in app.config.model_names())
             check("切换后上下文保留", app.agent.messages[0]["role"] == "system")
+            check("切换同时写入默认模型", app.config.default_model == switched, app.config.default_model)
+            check("默认模型已落盘",
+                  f'default_model = "{switched}"' in app.config.path.read_text(encoding="utf-8"))
 
             await type_command(pilot, "/model 不存在")
             check("未知模型被拦住并保持原模型", app.agent.model_key == switched)

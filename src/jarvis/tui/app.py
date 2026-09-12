@@ -27,7 +27,7 @@ from ..tools import build_registry, sysinfo
 from ..tools import clipboard as clipboard_mod
 from ..tools import notify as notify_mod
 from ..tools import procman, web
-from .screens import ConfirmScreen, HelpScreen
+from .screens import ConfirmScreen, HelpScreen, ModelPickerScreen
 from .widgets import (
     AssistantMessage,
     Notice,
@@ -81,6 +81,11 @@ class JarvisApp(App[None]):
 
     TITLE = "JARVIS-Win"
     SUB_TITLE = f"v{__version__} · 说人话，也干活"
+
+    # Focus the prompt box on boot. The chat pane is a scrollable container and
+    # therefore focusable, so leaving this to the default auto-focus can park the
+    # caret somewhere the user cannot type.
+    AUTO_FOCUS = "#prompt"
 
     CSS = """
     #body { height: 1fr; }
@@ -171,6 +176,7 @@ class JarvisApp(App[None]):
 
     def on_mount(self) -> None:
         self.theme = "textual-dark"
+        self._focus_prompt()
         self._refresh_panel_now()
         self._render_panel()
         self.set_interval(2.0, self._refresh_panel)
@@ -182,6 +188,14 @@ class JarvisApp(App[None]):
             self.scheduler.on_error = self._on_schedule_error
             self.scheduler.start()
         self.run_worker(self._greet(), name="greet")
+
+    def _focus_prompt(self) -> None:
+        """Put the caret back in the prompt box - modals take the focus with them."""
+
+        try:
+            self.query_one("#prompt", Input).focus()
+        except Exception:  # noqa: BLE001 - the widget is gone while shutting down
+            pass
 
     def _on_schedule_error(self, task: ScheduledTask, error: str) -> None:
         self.run_worker(self._append(Notice(f"任务 #{task.id} 出错：{error}", "bad")))
@@ -421,7 +435,7 @@ class JarvisApp(App[None]):
         if command in {"/quit", "/exit", "/q"}:
             self.exit()
         elif command in {"/help", "/?"}:
-            self.push_screen(HelpScreen())
+            self.push_screen(HelpScreen(), callback=lambda _result: self._focus_prompt())
         elif command == "/clear":
             await self.action_clear_chat()
         elif command == "/sys":
@@ -494,10 +508,14 @@ class JarvisApp(App[None]):
     # ------------------------------------------------------------------- models
     async def _handle_model_command(self, rest: str) -> None:
         positional, flags = split_flags(rest)
-        action = positional[0].lower() if positional else "list"
+        # A bare ``/model`` means "let me pick", not "print a table" - so the
+        # default here must be empty, not "list".
+        action = positional[0].lower() if positional else ""
         payload = positional[1:] if len(positional) > 1 else []
 
-        if action in {"list", ""}:
+        if action == "":
+            await self._pick_model()
+        elif action == "list":
             await self._show_models()
         elif action == "add":
             await self._add_model(payload, flags)
@@ -523,7 +541,7 @@ class JarvisApp(App[None]):
         chain = " → ".join(self.config.fallbacks_for(current)) or "（自动挑已配 Key 的）"
         await self._append(
             Notice(
-                "模型列表（/model <序号|名字> 热切换，切换后上下文保留）：\n"
+                "模型列表（/model 直接选，或 /model <序号|名字> 热切换）：\n"
                 + "\n".join(lines)
                 + f"\n\n当前 ▶ {current} · 故障自动切换：{chain}"
                 + "\n新增：/model add <名字> --provider <provider> --model <模型ID> [--env VAR]"
@@ -531,6 +549,40 @@ class JarvisApp(App[None]):
                 "info",
             )
         )
+
+    async def _pick_model(self) -> None:
+        """Arrow-key model picker, so switching does not require typing a name."""
+
+        if self._busy:
+            await self._append(Notice("正在跑任务，等它结束再切模型（Ctrl+X 可取消）。", "warn"))
+            return
+        current = self.agent.model_key
+        choices: list[tuple[str, str]] = []
+        for name in self.config.model_names():
+            model = self.config.models[name]
+            mark = "▶" if name == current else " "
+            key_state = "已配 Key" if model.key_ready else "缺 Key"
+            choices.append(
+                (
+                    name,
+                    f"{mark} {name}  ·  {model.provider or '自定义'}  ·  {model.model}  ·  {key_state}",
+                )
+            )
+
+        def _resolved(picked: str | None) -> None:
+            # Do NOT await anything here: this callback fires from the prompt's
+            # message handler, and blocking that freezes the whole UI. Hand the
+            # switch to a worker instead.
+            self._focus_prompt()
+            if picked:
+                self.run_worker(
+                    self._switch_model(picked), name="model-pick", group="model"
+                )
+
+        try:
+            self.push_screen(ModelPickerScreen(choices, current), callback=_resolved)
+        except Exception as exc:  # noqa: BLE001 - never wedge the prompt on a broken modal
+            await self._append(Notice(f"模型选择器打开失败（{exc}）。", "bad"))
 
     async def _switch_model(self, token: str) -> None:
         if self._busy:
@@ -546,11 +598,14 @@ class JarvisApp(App[None]):
         if key == previous:
             await self._append(Notice(f"已经是 {key}（{model.model}）了。", "info"))
             return
+        # Switching in the TUI means "this is the model I want to use", so it is
+        # persisted - reopening JARVIS must not silently fall back to the old one.
+        self.config.set_default(key)
         await self._append(
             Notice(
                 f"已切换到 {key} · {model.model}"
                 f"（{model.base_url}）{' ⚠ 还没配 Key' if not model.key_ready else ''}"
-                f"\n上下文 {len(self.agent.history())} 条消息保持不变。",
+                f"\n已设为默认模型（下次启动仍是它），上下文 {len(self.agent.history())} 条消息保持不变。",
                 "info" if model.key_ready else "warn",
             )
         )
@@ -1115,7 +1170,7 @@ class JarvisApp(App[None]):
                 worker.cancel()
 
     def action_help(self) -> None:
-        self.push_screen(HelpScreen())
+        self.push_screen(HelpScreen(), callback=lambda _result: self._focus_prompt())
 
     async def action_tasks(self) -> None:
         await self._show_tasks()

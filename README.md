@@ -47,17 +47,19 @@ api_key = "sk-..."      # 或者留空，改设环境变量 DEEPSEEK_API_KEY
 一个 *provider* 是「端点 + Key 放哪」，一个 *model* 是「provider + 模型 ID」，模型可以只写 provider 继承端点。
 
 ```text
-/model                      列出全部模型（按序号切换）
+/model                      打开交互式选择器（↑↓ 选 · Enter 切换 · Esc 取消）
+/model list                 打印模型表（带序号 / provider / Key 状态）
 /model 2                    按序号热切换；也可以 /model qwen、/model deepseek-chat
 /model add nei --provider myvllm --model qwen3-32b   新增模型
 /model rm nei               删除模型（在用中的会拒绝）
-/model default qwen         设为默认模型
+/model default qwen         设为默认模型（/model 切换时也会自动记住）
 /model fallback deepseek ollama     指定故障切换链
 /provider list              列出 provider 与密钥状态
 /provider add myvllm http://10.0.0.5:8000/v1 --env MYVLLM_KEY --label 公司内网
 /provider rm myvllm
 ```
 
+- **切换会被记住**：切换模型的同时会写成默认模型，下次启动仍是它（想临时试一个，试完切回来即可）。
 - **切换保留上下文**：换模型不会清空对话历史。
 - **故障自动切换**：当前模型网络失败 / 配额用尽 / Key 失效时，自动按 `fallback` 链试下一个，
   并在界面上说明「哪个模型挂了、切到了哪个」。没显式配链时会自动挑其它「可用」的模型（最多两个）。

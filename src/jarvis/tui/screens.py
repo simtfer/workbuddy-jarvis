@@ -7,7 +7,8 @@ from typing import Literal
 from textual.app import ComposeResult
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Static
+from textual.widgets import Button, OptionList, Static
+from textual.widgets.option_list import Option
 
 from ..core.agent import ConfirmRequest
 
@@ -64,6 +65,60 @@ class ConfirmScreen(ModalScreen[ConfirmChoice]):
         self.dismiss("deny")
 
 
+class ModelPickerScreen(ModalScreen[str | None]):
+    """Pick a model with the arrow keys, then Enter.
+
+    ``/model`` with no argument opens this instead of dumping a text list:
+    switching models is a thing you do with your hands, not by retyping a name.
+    Returns the chosen model's key, or ``None`` when cancelled.
+    """
+
+    BINDINGS = [("escape", "cancel", "取消")]
+
+    CSS = """
+    ModelPickerScreen { align: center middle; }
+    #picker-box {
+        width: 90%; max-width: 108; height: auto;
+        border: round $accent; background: $surface; padding: 1 2;
+    }
+    #picker-title { text-style: bold; color: $accent; }
+    #picker-list { height: auto; max-height: 16; margin: 1 0; }
+    #picker-hint { color: $text-muted; }
+    """
+
+    def __init__(self, choices: list[tuple[str, str]], current: str) -> None:
+        super().__init__()
+        self.choices = choices
+        self.current_key = current
+
+    def compose(self) -> ComposeResult:
+        with Container(id="picker-box"):
+            yield Static("选择模型", id="picker-title")
+            yield OptionList(
+                *(Option(label, id=key) for key, label in self.choices),
+                id="picker-list",
+            )
+            yield Static(
+                "↑↓ 移动 · Enter 切换 · Esc 取消　——　切换会同时设为默认模型，下次启动仍用它。",
+                id="picker-hint",
+            )
+
+    def on_mount(self) -> None:
+        listing = self.query_one("#picker-list", OptionList)
+        # Start on the model in use so Enter is a no-op rather than a surprise.
+        listing.highlighted = next(
+            (index for index, (key, _) in enumerate(self.choices) if key == self.current_key),
+            0,
+        )
+        listing.focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(event.option.id)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class HelpScreen(ModalScreen[None]):
     """Keyboard and slash-command cheatsheet."""
 
@@ -95,12 +150,13 @@ JARVIS-Win · Phase 4
   —— 读写剪贴板、结束/挂起进程都会弹窗确认；系统关键进程会被拒绝。
 
 模型与 Provider
-  /model                     列出模型（带序号 / provider / Key 状态）
-  /model 2                   按序号热切换（切换后上下文保留）
-  /model qwen                按名字切；主模型挂了会自动切到备用模型
+  /model                     打开模型选择器（↑↓ 选，Enter 切换）
+  /model list                打印模型表（带序号 / provider / Key 状态）
+  /model 2                   按序号热切换；/model qwen 按名字切
   /model add gpt --provider openai --model gpt-4o-mini --env OPENAI_API_KEY
                              新增模型并写回 config.toml（加 --default 设为默认）
   /model rm <名字>           删除模型
+  /model default <名字>      设为默认模型（/model 切换时也会自动记住）
   /model fallback qwen ollama  设置故障自动切换链
   /provider list             列出全部内置 provider + 搜索后端
   /provider add myvllm http://10.0.0.5:8000/v1 --env MYVLLM_KEY
