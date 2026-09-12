@@ -1,5 +1,6 @@
 """Textual user interface."""
 
-from .app import JarvisApp, _selftest
+from .app import JarvisApp
+from .commands import split_flags
 
-__all__ = ["JarvisApp", "_selftest"]
+__all__ = ["JarvisApp", "split_flags"]

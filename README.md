@@ -332,7 +332,7 @@ TUI (Textual)  →  Agent 内核  →  工具层  →  LLM 适配 / 记忆
         计划器 · 调度器 · provider 目录 · 守护进程（热键 + 托盘）
 ```
 
-- `src/jarvis/tui/` — 界面：聊天流、左侧命令菜单、系统面板、确认弹窗、帮助面板、计划面板
+- `src/jarvis/tui/` — 界面：`app.py` 聊天流与事件渲染（App 只管对话主循环）、`commands.py` 斜杠命令层（模型/provider/搜索/记忆/剪贴板/进程/任务）、`syspanel.py` 右侧系统面板采样渲染、`styles.py` 样式、`widgets.py` 组件（横幅、命令菜单、折叠的工具/思考/子任务块）、`screens.py` 弹窗（确认、帮助、模型选择、子任务详情）
 - `src/jarvis/core/` — `agent.py` 对话循环（流式 + 工具调度 + 计划执行 + 记忆提炼 + 故障切换 + delegate_subagents 拦截）、`registry.py` 工具注册与截断、`planner.py` 计划解析、`scheduler.py` 调度与下次执行时间计算、`prompts.py` 人设与系统提示、`subagent.py` SubAgentManager（并发执行 + 部分/最终双输出）
 - `src/jarvis/llm/` — 仅依赖 OpenAI 兼容协议；端点不支持 tools 时自动降级为纯对话
 - `src/jarvis/providers.py` — 内置 provider / 搜索后端预设目录 + base_url 反查

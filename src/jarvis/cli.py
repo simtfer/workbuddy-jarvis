@@ -141,6 +141,78 @@ def _run_search(config: Config, query: str, provider: str) -> int:
     return 0
 
 
+def _selftest(ping: bool = False) -> int:
+    """Headless sanity check: config, tools, registry, scheduler, optional live call.
+
+    Lives here (not in the TUI package) because it never opens the interface -
+    it is a CLI health check over the same building blocks.
+    """
+
+    from .core.scheduler import ScheduledTask, TaskStore
+    from .memory.store import HistoryStore, default_db_path
+    from .tools import build_registry, clipboard as clipboard_mod
+    from .tools import fs, procman, sysinfo, web
+
+    config = load_config()
+    print(f"config      : {config.path} (created={config.created})")
+    print(f"default     : {config.default_model}")
+    registry = build_registry(config.security, str(config.workdir), config.search)
+    print(f"tools       : {', '.join(t.name for t in registry.tools)}")
+    print(f"workdir     : {config.workdir}")
+    print(
+        f"memory      : auto_learn={config.memory.auto_learn} every={config.memory.learn_every} "
+        f"max_in_prompt={config.memory.max_facts_in_prompt}"
+    )
+    print(f"daemon      : hotkey={config.daemon.hotkey} scheduler={config.daemon.scheduler} "
+          f"tray={config.daemon.tray}")
+    print(f"providers   : {len(config.catalog.presets)} 个内置 + "
+          f"{len(config.user_providers)} 个自定义；search={web.describe(config.search)}")
+    for name in config.model_names():
+        model = config.models[name]
+        print(
+            f"  model {name:<10} provider={model.provider or '-':<12} {model.model:<28} "
+            f"key={'yes' if model.key_ready else 'MISSING'}"
+        )
+    print(f"fallback    : {' → '.join(config.fallbacks_for(config.default_model)) or '(无)'}")
+
+    print("--- sysinfo ---")
+    print(sysinfo.sys_report(include_processes=3))
+    print("--- clipboard ---")
+    preview = clipboard_mod.clipboard_text(80)
+    print(f"text        : {preview or '(剪贴板没有文本)'}")
+    print("--- processes ---")
+    print(procman.list_processes(sort_by="cpu", limit=3))
+    print("--- fs ---")
+    print(fs.list_dir(str(config.workdir))[:400])
+
+    store = HistoryStore(default_db_path())
+    print(f"--- store ---\n{store.path} · facts={store.fact_count()} · sessions/messages={store.stats()}")
+    task_store = TaskStore(store.conn)
+    demo = ScheduledTask(id=None, kind="interval", spec="30", prompt="selftest")
+
+    now = datetime(2026, 9, 11, 12, 0)
+    print(
+        f"--- scheduler ---\ninterval next={demo.next_after(now)} · "
+        f"tasks={len(task_store.list())}"
+    )
+    store.close()
+
+    model = config.model()
+    key = model.resolve_api_key()
+    print(f"--- model {model.name}: key={'yes' if key else 'MISSING'} base_url={model.base_url}")
+    if ping and key:
+        from .llm.client import LLMClient
+
+        async def _ping() -> None:
+            client = LLMClient(model)
+            result = await client.stream([{"role": "user", "content": "只回复两个字：在线"}])
+            print(f"reply       : {result.content.strip()[:80]}")
+            await client.aclose()
+
+        asyncio.run(_ping())
+    return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="jarvis", description="JARVIS-Win · Windows 超级 AI 助手")
     parser.add_argument("--selftest", action="store_true", help="不开 TUI，自检配置、工具与调度器")
@@ -197,8 +269,6 @@ def main() -> None:
         sys.exit(_run_search(config, args.search, args.search_provider))
 
     if args.selftest or args.ping:
-        from .tui.app import _selftest
-
         sys.exit(_selftest(ping=args.ping))
 
     if args.daemon:

@@ -81,7 +81,7 @@ async def main() -> int:
             check("左侧命令菜单默认收起", menu.has_class("collapsed"))
             check("右侧系统面板默认收起", side.has_class("hidden"))
             check("收起时菜单只剩一条边栏", not app.query_one("#menu-box").display)
-            check("收起时面板不采集", app._panel_data is None)
+            check("收起时面板不采集", app.panel.data is None)
 
             app.action_toggle_side()
             await pilot.pause()
