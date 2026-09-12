@@ -351,7 +351,7 @@ class Config:
             # Overriding a built-in: keep it as a user entry so it survives a reload.
             pass
         self.user_providers[key] = {
-            "label": label.strip() or key,
+            "label": label.strip(),
             "base_url": base_url.strip(),
             "api_key_env": api_key_env.strip(),
             "models": list(models or []),
@@ -480,9 +480,17 @@ class Config:
             for name, item in sorted(self.user_providers.items()):
                 lines.append("")
                 lines.append(f"[providers.{name}]")
-                lines.append(f'label = "{item.get("label", name)}"')
+                # Only write what the user actually set. An omitted field means
+                # "inherit from the built-in preset of the same name", so
+                # emitting blanks would be noise - and on the next read a blank
+                # label would shadow the built-in one.
+                if item.get("label"):
+                    lines.append(f'label = "{item["label"]}"')
                 lines.append(f'base_url = "{item.get("base_url", "")}"')
-                lines.append(f'api_key_env = "{item.get("api_key_env", "")}"')
+                if item.get("api_key_env"):
+                    lines.append(f'api_key_env = "{item["api_key_env"]}"')
+                if item.get("note"):
+                    lines.append(f'note = "{item["note"]}"')
                 models = item.get("models") or []
                 if models:
                     joined = ", ".join(f'"{m}"' for m in models)
@@ -588,7 +596,10 @@ def _parse(raw: dict) -> Config:
             continue
         models = item.get("models") or []
         user_providers[str(name)] = {
-            "label": str(item.get("label", name)),
+            # Leave label empty when the user did not set one, so that
+            # ProviderCatalog.build can fall back to the built-in preset's
+            # label (or the entry name) instead of shadowing it with the key.
+            "label": str(item.get("label", "")),
             "base_url": str(item.get("base_url", "")),
             "api_key_env": str(item.get("api_key_env", "")),
             "models": [str(m) for m in models] if isinstance(models, list) else [],

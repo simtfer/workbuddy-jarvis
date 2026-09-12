@@ -65,6 +65,70 @@ api_key = "sk-..."      # 或者留空，改设环境变量 DEEPSEEK_API_KEY
   会识别为自建端点，不会误报「缺 Key」（Ollama / LM Studio / 公司 vLLM 开箱即用）。
 - **单模型超时**：`/model add ... --timeout 30`（默认 180 秒）。端点挂死时不用干等。
 
+### 手动添加自定义 provider（改配置文件）
+
+`config.toml` 就在项目根目录（已 git-ignore）。除了 `/provider add`，也可以直接手写，改完**重启 JARVIS** 生效。
+两种写法：
+
+**写法一：先定义 provider，多个模型共享（推荐）**
+
+```toml
+# 端点与 Key 来源集中写一次
+[providers.myapi]
+label = "我的中转"                              # 显示名；省略则用条目名（覆盖内置时继承内置名）
+base_url = "https://api.example.com/v1"         # 必填，OpenAI 兼容端点
+api_key_env = "MYAPI_KEY"                       # 从环境变量读 Key
+models = ["gpt-4o-mini", "claude-sonnet-4"]     # 可选，仅供 /provider list 展示
+
+# 模型只写 provider + 模型 ID，端点与 Key 自动继承
+[models.myapi]
+provider = "myapi"
+model = "gpt-4o-mini"
+```
+
+**写法二：不定义 provider，直接写全（最简）**
+
+```toml
+[models.quick]
+base_url = "https://api.example.com/v1"
+model = "gpt-4o-mini"
+api_key = "sk-xxxx"          # 也可以换成 api_key_env = "MYAPI_KEY"
+```
+
+**字段说明**
+
+| 字段 | 位置 | 必填 | 说明 |
+|------|------|------|------|
+| `base_url` | `[providers.*]` · `[models.*]` | 是 | OpenAI 兼容端点，一般以 `/v1` 结尾 |
+| `model` | `[models.*]` | 是 | 服务商文档里的模型 ID |
+| `provider` | `[models.*]` | 否 | 填了就继承该 provider 的端点与 Key 来源 |
+| `api_key` | 两处皆可 | 否 | 明文 Key；与 `api_key_env` 都写时以它为准 |
+| `api_key_env` | 两处皆可 | 否 | 环境变量名，如 `MYAPI_KEY` |
+| `label` | 两处皆可 | 否 | 显示名；不写时自定义项用条目名，覆盖内置时继承内置名 |
+| `note` | `[providers.*]` | 否 | 备忘说明，`/provider list` 里显示 |
+| `models` | `[providers.*]` | 否 | 只给 `/provider list` 展示用，**不会自动生成模型** |
+| `supports_tools` | `[models.*]` | 否 | 默认 `true`；端点不支持函数调用就设 `false`，会走纯对话 |
+| `temperature` | `[models.*]` | 否 | 默认 `0.3` |
+| `timeout` | `[models.*]` | 否 | 默认 `180` 秒；端点容易挂死就调小 |
+| `default_model` | 文件顶部 | 否 | 设为默认模型，如 `default_model = "myapi"`（也可用 `/model default myapi`）|
+
+**几点注意**
+
+- **覆盖内置 provider**：只写想改的字段即可，其余继续继承内置预设。例如把内置 OpenAI 指到你的代理：
+
+  ```toml
+  [providers.openai]
+  base_url = "https://my-proxy.example.com/v1"
+  ```
+
+  显示名仍是 `OpenAI`，Key 仍读 `OPENAI_API_KEY`。想恢复用 `/provider rm openai`，或删掉这段手工配置。
+- **本地 / 内网端点不要求 Key**：`localhost`、`127.0.0.1`、`192.168.*`、`10.*`、`172.16-31.*`、`*.local`
+  会被认作自建端点，不会误报「缺 Key」。
+- **`console` 字段无效**：那是内置预设用来标「去哪申请 Key」的，手写的 provider 不读它。
+- **JARVIS 会重写这个文件**：执行 `/provider add`、`/model` 等命令后 `config.toml` 会被重新生成
+  （注释与字段顺序会变），但只写出你实际设置过的字段，语义不变。手写后建议用 `/provider list` 和 `/model`
+  确认读到了。
+
 ### 联网搜索
 
 ```text

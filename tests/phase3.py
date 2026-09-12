@@ -506,6 +506,77 @@ def test_split_flags() -> None:
     check("空输入", split_flags("") == ([], {}))
 
 
+# ------------------------------------------------------- handwritten providers
+def test_handwritten_providers(tmp: Path) -> None:
+    """A [providers.*] block written by hand must parse, inherit, and survive a rewrite.
+
+    This is the path a user takes when they edit config.toml directly instead of
+    using /provider add, so the guarantees here are what the README promises.
+    """
+
+    text = """
+default_model = "myapi"
+
+[providers.myapi]
+label = "我的中转"
+base_url = "https://api.example.com/v1"
+api_key_env = "MYAPI_KEY"
+models = ["gpt-4o-mini"]
+note = "手写测试"
+
+[models.myapi]
+provider = "myapi"
+model = "gpt-4o-mini"
+
+[models.quick]
+base_url = "https://quick.example.com/v1"
+model = "gpt-4o-mini"
+api_key = "sk-quick"
+
+[providers.openai]
+base_url = "https://my-proxy.example.com/v1"
+
+[providers.nolabel]
+base_url = "https://nl.example.com/v1"
+"""
+    path = _write(tmp / "hand.toml", text)
+    cfg = load_config(path)
+
+    handed = cfg.catalog.get("myapi")
+    check("手写 provider 被解析", handed is not None)
+    check("手写 provider 字段完整",
+          handed is not None and handed.base_url == "https://api.example.com/v1")
+    check("手写 provider 的 label 保留", handed is not None and handed.label == "我的中转")
+    check("手写 provider 的 note 保留", handed is not None and handed.note == "手写测试")
+    check("手写 provider 的 models 保留", handed is not None and handed.models == ("gpt-4o-mini",))
+
+    inherits = cfg.model("myapi")
+    check("模型继承手写 provider 的端点", inherits.base_url == "https://api.example.com/v1")
+    check("模型继承手写 provider 的 key_env", inherits.api_key_env == "MYAPI_KEY")
+    check("模型继承手写 provider 的 label", inherits.label == "我的中转")
+
+    quick = cfg.model("quick")
+    check("不写 provider 也能配模型",
+          quick.base_url == "https://quick.example.com/v1" and quick.api_key == "sk-quick")
+
+    overridden = cfg.catalog.require("openai")
+    check("覆盖内置 provider 的端点", overridden.base_url == "https://my-proxy.example.com/v1")
+    check("覆盖内置时仍继承内置 label", overridden.label == PROVIDERS["openai"].label)
+    check("覆盖内置时仍继承内置 key_env", overridden.api_key_env == PROVIDERS["openai"].api_key_env)
+    check("未写 label 的自定义 provider 退回名字",
+          cfg.catalog.require("nolabel").label == "nolabel")
+
+    cfg.save(path)
+    again = load_config(path)
+    check("重写后自定义 provider 仍在", again.catalog.require("myapi").note == "手写测试")
+    check("重写后覆盖内置仍生效",
+          again.catalog.require("openai").base_url == "https://my-proxy.example.com/v1")
+    check("重写后内置 label 不回退",
+          again.catalog.require("openai").label == PROVIDERS["openai"].label)
+    check("重写后最简写法的模型仍可用", again.model("quick").api_key == "sk-quick")
+    check("重写后默认模型保留", again.default_model == "myapi")
+
+
 # ------------------------------------------------------------------------- tray
 def test_tray() -> None:
     from jarvis.daemon import tray
@@ -533,6 +604,7 @@ def main() -> int:
         test_providers()
         test_tomlwrite()
         test_config_providers(tmp)
+        test_handwritten_providers(tmp)
         test_hot_switch()
         test_failover()
         test_fallback_config()
