@@ -40,7 +40,6 @@ from .widgets import (
     PlanView,
     ThinkingView,
     ToolCallView,
-    ToolResultView,
     UserMessage,
     menu_head,
 )
@@ -120,9 +119,10 @@ class JarvisApp(App[None]):
         background: $panel 20%;
     }
     .thinking-body { color: $text-muted; padding: 0 0 1 0; }
-    .tool-call { color: $warning; padding: 0 1; margin-top: 1; }
-    .tool-result { color: $text-muted; padding: 0 1 0 3; }
-    .tool-result.bad { color: $error; }
+    .tool-call { margin-top: 1; background: transparent; border-top: none; }
+    .tool-call CollapsibleTitle { color: $warning; background: transparent; padding: 0 1; }
+    .tool-call.bad CollapsibleTitle { color: $error; }
+    .tool-body { color: $text-muted; padding: 0 0 1 0; }
     .notice { color: $text-muted; padding: 0 1; margin-top: 1; }
     .notice.bad { color: $error; }
     .notice.warn { color: $warning; }
@@ -176,6 +176,7 @@ class JarvisApp(App[None]):
         self._session_allow: set[str] = set()
         self._stream_widget: AssistantMessage | None = None
         self._thinking_widget: ThinkingView | None = None
+        self._tool_view: ToolCallView | None = None
         self._plan_view: PlanView | None = None
         self._busy = False
         self._panel_busy = False
@@ -354,6 +355,7 @@ class JarvisApp(App[None]):
         self._tool_count = 0
         self._stream_widget = None
         self._thinking_widget = None
+        self._tool_view = None
         started = time.monotonic()
         try:
             async for event in factory():
@@ -367,6 +369,7 @@ class JarvisApp(App[None]):
         finally:
             self._busy = False
             self._stream_widget = None
+            self._tool_view = None
             if self._thinking_widget is not None:
                 self._thinking_widget.finish()
                 self._thinking_widget = None
@@ -406,13 +409,22 @@ class JarvisApp(App[None]):
             self._tool_count += 1
             args = event.get("arguments") or {}
             detail = str(args.get("command") or args.get("path") or "")[:90]
-            await self._append(ToolCallView(event["name"], detail))
+            self._tool_view = ToolCallView(event["name"], detail, args)
+            await self._append(self._tool_view)
         elif kind == "tool_result":
             self._stream_widget = None
             self._close_thinking()
-            await self._append(
-                ToolResultView(event["name"], event["output"], bool(event.get("ok")))
-            )
+            ok = bool(event.get("ok"))
+            if self._tool_view is not None:
+                # Fold the result into the block opened by the matching start.
+                self._tool_view.set_result(event["output"], ok)
+                self._tool_view = None
+            else:
+                # A result with no start (refused confirmation, sub-agent
+                # summary): a self-contained block in finished form.
+                await self._append(
+                    ToolCallView(event["name"], "", output=event["output"], ok=ok)
+                )
         elif kind == "notice":
             await self._append(Notice(event["text"], "info"))
         elif kind == "plan":
@@ -492,6 +504,7 @@ class JarvisApp(App[None]):
             await self._append(Notice(event["message"], "bad"))
         elif kind == "done":
             self._close_thinking()
+            self._tool_view = None
             if self._stream_widget is not None:
                 await self._stream_widget.append_text("")
 
@@ -1268,6 +1281,7 @@ class JarvisApp(App[None]):
         self._plan_view = None
         self._stream_widget = None
         self._thinking_widget = None
+        self._tool_view = None
 
     def action_toggle_menu(self) -> None:
         """Collapse / expand the left command menu (Ctrl+B)."""

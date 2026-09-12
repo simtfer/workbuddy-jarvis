@@ -15,7 +15,6 @@ from jarvis.tui.widgets import (
     AssistantMessage,
     Notice,
     ToolCallView,
-    ToolResultView,
     UserMessage,
 )
 
@@ -77,8 +76,17 @@ async def main() -> None:
         await pilot.pause()
 
         await app._append(UserMessage(QUERY))
-        await app._append(ToolCallView("web_search", 'query="今天 AI 领域有什么值得关注的动态", max_results=4'))
-        await app._append(ToolResultView("web_search", RESULTS, True))
+        # One tool block expanded (what you get after a click) and one collapsed
+        # (the default): the overview line always stays visible either way.
+        search_tool = ToolCallView(
+            "web_search",
+            "query=今天 AI 领域…",
+            arguments={"query": "今天 AI 领域有什么值得关注的动态", "max_results": 4},
+            output=RESULTS,
+            ok=True,
+        )
+        await app._append(search_tool)
+        search_tool.collapsed = False
         bubble = AssistantMessage()
         await app._append(bubble)
         await bubble.append_text(ANSWER)
@@ -87,8 +95,15 @@ async def main() -> None:
         await app._append(Notice("· 本次调用 1 个工具，用时 4.1s", "info"))
 
         await app._append(UserMessage(FOLLOW_UP))
-        await app._append(ToolCallView("list_processes", 'sort_by="cpu", limit=5'))
-        await app._append(ToolResultView("list_processes", PROCESSES, True))
+        await app._append(
+            ToolCallView(
+                "list_processes",
+                "sort_by=cpu",
+                arguments={"sort_by": "cpu", "limit": 5},
+                output=PROCESSES,
+                ok=True,
+            )
+        )
 
         app._focus_prompt()
         await pilot.pause()

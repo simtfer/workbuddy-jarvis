@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from textual import events, on
@@ -111,23 +112,79 @@ class ThinkingView(Collapsible):
             self.title = f"🧠 思考过程（{chars} 字，点击展开）"
 
 
-class ToolCallView(Static):
-    """One line telling the user which tool ran."""
-
-    def __init__(self, name: str, detail: str) -> None:
-        super().__init__(f"⚙ {name}  {detail}", markup=False, classes="tool-call")
+TOOL_RESULT_LIMIT = 12  # lines of tool output kept inside the collapsed body
 
 
-class ToolResultView(Static):
-    """Collapsed tool output (first lines only)."""
+class ToolCallView(Collapsible):
+    """One tool call, collapsed to a single overview line.
 
-    def __init__(self, name: str, output: str, ok: bool, limit: int = 12) -> None:
-        lines = output.splitlines()
-        shown = "\n".join(lines[:limit])
-        if len(lines) > limit:
-            shown += f"\n… 还有 {len(lines) - limit} 行（已省略）"
-        prefix = "✓" if ok else "✗"
-        super().__init__(f"{prefix} {name}\n{shown}", markup=False, classes="tool-result ok" if ok else "tool-result bad")
+    The title is the overview - live status mark, tool name, and its most
+    telling argument - so a glance at the chat shows what happened without
+    the wall of JSON. Expanding reveals the full arguments and a trimmed
+    copy of the output. Like :class:`ThinkingView`, the body rides in as a
+    constructor child (never override ``compose`` on a Collapsible subclass).
+    """
+
+    def __init__(
+        self,
+        name: str,
+        detail: str = "",
+        arguments: dict[str, Any] | None = None,
+        output: str = "",
+        ok: bool = True,
+        **kwargs: Any,
+    ) -> None:
+        self._body = Static("", markup=False, classes="tool-body")
+        super().__init__(
+            self._body, title="", collapsed=True, classes="tool-call", **kwargs
+        )
+        self.tool_name = name
+        self._detail = detail
+        self._args_line = self._render_arguments(arguments)
+        self._status = "running"
+        self._output = ""
+        self._refresh_view()
+        if output:
+            self.set_result(output, ok)
+
+    @staticmethod
+    def _render_arguments(arguments: dict[str, Any] | None) -> str:
+        if not arguments:
+            return ""
+        try:
+            pretty = json.dumps(arguments, ensure_ascii=False)
+        except (TypeError, ValueError):
+            pretty = str(arguments)
+        return f"参数  {pretty}"
+
+    # NOTE: named ``_refresh_view``, not ``_render`` - ``Widget._render`` is
+    # Textual's internal line renderer and overriding it returns None into
+    # ``Visual.to_strips`` and crashes rendering (same trap as ``task``/``name``).
+    def _refresh_view(self) -> None:
+        mark = {"running": "…", "ok": "✓", "bad": "✗"}.get(self._status, "·")
+        title = f"{mark} ⚙ {self.tool_name}"
+        if self._detail:
+            title += f"  {self._detail}"
+        self.title = title
+        self.set_class(self._status == "bad", "bad")
+
+        lines: list[str] = []
+        if self._args_line:
+            lines.append(self._args_line)
+        if self._output:
+            body_lines = self._output.splitlines()
+            kept = "\n".join(body_lines[:TOOL_RESULT_LIMIT])
+            if len(body_lines) > TOOL_RESULT_LIMIT:
+                kept += f"\n… 还有 {len(body_lines) - TOOL_RESULT_LIMIT} 行（已省略）"
+            lines.append("结果\n" + kept)
+        self._body.update("\n".join(lines))
+
+    def set_result(self, output: str, ok: bool) -> None:
+        """Record the tool result and re-render in finished form."""
+
+        self._output = output
+        self._status = "ok" if ok else "bad"
+        self._refresh_view()
 
 
 class Notice(Static):

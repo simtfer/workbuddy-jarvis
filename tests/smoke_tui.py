@@ -16,7 +16,7 @@ from jarvis.config import build_default_config, load_config
 from jarvis.core.agent import ConfirmRequest
 from jarvis.tui.app import JarvisApp
 from jarvis.tui.screens import ConfirmScreen, HelpScreen, ModelPickerScreen
-from jarvis.tui.widgets import MENU, MENU_CONTENT, CommandMenu, ThinkingView
+from jarvis.tui.widgets import MENU, MENU_CONTENT, CommandMenu, ThinkingView, ToolCallView
 
 # Dump every thread's stack if the test wedges, so a hang is never a mystery.
 # The budget is generous because each command waits for the app to look idle,
@@ -433,6 +433,48 @@ async def main() -> int:
             await app._handle_event({"type": "done"})
             await pilot.pause()
             check("done 后思考块封存", app._thinking_widget is None)
+
+            # ------------------------------------------------ tool call blocks
+            chat = app.query_one("#chat")
+            await app._handle_event(
+                {"type": "tool_start", "name": "run_shell", "arguments": {"command": "echo hi"}}
+            )
+            await pilot.pause()
+            tool_view = app._tool_view
+            check("工具块已渲染", isinstance(tool_view, ToolCallView))
+            check("工具块默认折叠", tool_view is not None and tool_view.collapsed is True)
+            check("工具概览含名称与命令",
+                  tool_view is not None and "run_shell" in tool_view.title and "echo hi" in tool_view.title)
+            tool_body = tool_view.query_one(".tool-body")
+            check("工具参数进折叠体", "echo hi" in str(tool_body.content))
+            check("运行中概览带省略号", tool_view is not None and "…" in tool_view.title)
+
+            await app._handle_event(
+                {"type": "tool_result", "name": "run_shell", "output": "hi", "ok": True}
+            )
+            await pilot.pause()
+            check("工具结果显示完成态", "✓" in tool_view.title)
+            check("工具结果进折叠体", "hi" in str(tool_body.content))
+            check("完成后视图指针复位", app._tool_view is None)
+
+            # A result without a matching start (refused confirmation,
+            # sub-agent summary) becomes a self-contained finished block.
+            before_tools = len(chat.children)
+            await app._handle_event(
+                {"type": "tool_result", "name": "write_file",
+                 "output": "[已拒绝] 用户拒绝执行该操作", "ok": False}
+            )
+            await pilot.pause()
+            standalone = next(
+                (c for c in reversed(chat.children) if isinstance(c, ToolCallView)), None
+            )
+            check("无 start 的结果独立成块",
+                  standalone is not None and standalone is not tool_view
+                  and standalone is not None and "✗" in standalone.title,
+                  str(standalone.title if standalone else None))
+            standalone_body = standalone.query_one(".tool-body")
+            check("独立块折叠体含结果", "已拒绝" in str(standalone_body.content))
+            check("独立块不占运行指针", app._tool_view is None)
 
             # ------------------------------------------------------- modals etc.
             request = ConfirmRequest(tool="run_shell", arguments={"command": "echo hi"}, hint="test")
