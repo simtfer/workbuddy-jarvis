@@ -476,6 +476,21 @@ async def main() -> int:
             check("独立块折叠体含结果", "已拒绝" in str(standalone_body.content))
             check("独立块不占运行指针", app._tool_view is None)
 
+            # Consecutive collapsed tool blocks must not have a blank line
+            # between them: Collapsible's default padding-bottom + our
+            # margin-top would add up to two empty rows.
+            await app._handle_event(
+                {"type": "tool_start", "name": "web_search", "arguments": {"query": "x"}}
+            )
+            await pilot.pause()
+            tight_view = app._tool_view
+            check("连续工具块紧凑无空行",
+                  tight_view is not None and "-collapsed" in tight_view.classes
+                  and tuple(tight_view.styles.margin)[0] == 0
+                  and tuple(tight_view.styles.padding)[2] == 0,
+                  f"margin={tight_view.styles.margin if tight_view else None} "
+                  f"padding={tight_view.styles.padding if tight_view else None}")
+
             # ------------------------------------------------------- modals etc.
             request = ConfirmRequest(tool="run_shell", arguments={"command": "echo hi"}, hint="test")
             answer = asyncio.ensure_future(app._confirm(request))

@@ -120,6 +120,10 @@ class JarvisApp(App[None]):
     }
     .thinking-body { color: $text-muted; padding: 0 0 1 0; }
     .tool-call { margin-top: 1; background: transparent; border-top: none; }
+    /* Collapsed tool blocks sit directly under each other - Collapsible's
+       default padding-bottom would leave a blank line between two of them.
+       An expanded block keeps the breathing room via the base rule above. */
+    .tool-call.-collapsed { margin-top: 0; padding-bottom: 0; }
     .tool-call CollapsibleTitle { color: $warning; background: transparent; padding: 0 1; }
     .tool-call.bad CollapsibleTitle { color: $error; }
     .tool-body { color: $text-muted; padding: 0 0 1 0; }
