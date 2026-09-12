@@ -54,10 +54,18 @@ class SystemPanel:
             pass
 
     def toggle(self) -> bool:
-        """Flip the sidebar; returns True when it just became visible."""
+        """Flip the sidebar; returns True when it just became visible.
+
+        The rail (the click target used while the panel is closed) is kept in
+        the opposite state: exactly one of the two is ever on screen.
+        """
 
         side = self.app.query_one("#side")
         side.toggle_class("hidden")
+        try:
+            self.app.query_one("#side-rail").toggle_class("hidden")
+        except Exception:  # noqa: BLE001 - the rail is cosmetic
+            pass
         if side.has_class("hidden"):
             return False
         # Sample on open: while the panel is collapsed its timers stay quiet, so

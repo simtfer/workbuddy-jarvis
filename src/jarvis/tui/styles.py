@@ -20,7 +20,11 @@ CSS = """
 #menu.collapsed #menu-rail { display: block; }
 #menu-box { height: 1fr; }
 #menu.collapsed #menu-box { display: none; }
+/* Collapse / expand handles: the rail is the click target when the sidebar is
+   closed, the head when it is open. Hover feedback so they read as clickable. */
+#menu-rail:hover { background: $panel 40%; }
 #menu-head { color: $text-muted; padding: 0 0 1 0; }
+#menu-head:hover { background: $panel 40%; }
 #menu-list {
     height: 1fr; border: none; padding: 0; background: transparent;
 }
@@ -30,6 +34,13 @@ CSS = """
     width: 46; padding: 0 1; border-left: solid $panel; color: $text-muted;
 }
 #side.hidden { display: none; }
+/* The panel's click target while it is collapsed: #side is display:none, so
+   the handle lives outside it, as a thin strip on the far right edge. */
+#side-rail { width: 3; padding: 1 0 0 0; color: $accent; }
+#side-rail.hidden { display: none; }
+#side-rail:hover { background: $panel 40%; }
+#side-head { color: $accent; padding: 0 0 1 0; }
+#side-head:hover { background: $panel 40%; }
 #banner { color: $accent; padding: 1 0 0 0; }
 .user-message {
     color: $text; background: $primary 25%; border-left: thick $primary;

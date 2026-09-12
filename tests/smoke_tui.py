@@ -104,6 +104,22 @@ async def main() -> int:
             await pilot.pause()
             check("Ctrl+S 收得起系统面板", side.has_class("hidden"))
 
+            # -------------------------------------------- mouse: click to toggle
+            # Collapsed: the rail strip on the far right is the click target
+            # (#side itself is display:none, so it cannot be clicked).
+            rail = app.query_one("#side-rail")
+            check("收起时右侧边条可见", rail.display)
+            check("展开时右侧边条藏起前·面板确实是收起的", side.has_class("hidden"))
+            await pilot.click("#side-rail")
+            await pilot.pause()
+            check("点边条展开系统面板", not side.has_class("hidden"))
+            check("展开后边条自动隐藏", not rail.display)
+
+            await pilot.click("#side-head")
+            await pilot.pause()
+            check("点面板头收起系统面板", side.has_class("hidden"))
+            check("收起后边条重新出现", rail.display)
+
             # ------------------------------------------------------- left menu
             menu_list = app.query_one("#menu-list", CommandMenu)
             app.action_toggle_menu()
@@ -145,6 +161,17 @@ async def main() -> int:
             await pilot.pause()
             check("Esc 收起菜单", menu.has_class("collapsed"))
             check("收起后焦点回到输入框", getattr(app.focused, "id", None) == "prompt")
+
+            # Left menu by mouse: the ≡ rail opens it, the head block closes it.
+            menu_rail = app.query_one("#menu-rail")
+            check("收起时菜单边条可见", menu_rail.display)
+            await pilot.click("#menu-rail")
+            await pilot.pause()
+            check("点 ≡ 展开菜单", not menu.has_class("collapsed"))
+            check("展开后 ≡ 让位给菜单", not menu_rail.display)
+            await pilot.click("#menu-head")
+            await pilot.pause()
+            check("点菜单头收起菜单", menu.has_class("collapsed"))
 
             # Activating a row runs its command and puts the menu away again.
             app.action_toggle_menu()

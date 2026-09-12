@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import asyncio
 import faulthandler
+import os
 import sys
 import tempfile
 import tomllib
 from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 from jarvis.config import (
     Config,
@@ -217,16 +219,22 @@ def test_config_providers(tmp: Path) -> None:
     check("显式 fallback 链", reloaded.fallbacks_for("deepseek") == ["nei", "qwen"])
     check("fallback 链排除自己", "deepseek" not in reloaded.fallbacks_for("deepseek"))
 
-    auto = replace(reloaded, fallback_models=[])
-    chain = auto.fallbacks_for("deepseek")
-    usable = [n for n in auto.model_names() if n != "deepseek" and auto.models[n].key_ready]
-    check("无显式链时按顺序挑可用的，最多两个", chain == usable[:2], str(chain))
-    check(
-        "自动链排除缺 Key 的云端模型",
-        "qwen" not in chain and "doubao" not in chain and "kimi" not in chain,
-        str(chain),
-    )
-    check("自动链包含本地/内网模型", "nei" in chain, str(chain))
+    # "No key" means no key *in this process*: a developer with ARK_API_KEY
+    # exported would see doubao counted as usable and the two checks below
+    # would fail on a machine that has nothing to do with the code. Blank the
+    # preset key variables so the expectation is about the config, not the env.
+    blank_keys = {preset.api_key_env: "" for preset in PROVIDERS.values() if preset.api_key_env}
+    with mock.patch.dict(os.environ, blank_keys):
+        auto = replace(reloaded, fallback_models=[])
+        chain = auto.fallbacks_for("deepseek")
+        usable = [n for n in auto.model_names() if n != "deepseek" and auto.models[n].key_ready]
+        check("无显式链时按顺序挑可用的，最多两个", chain == usable[:2], str(chain))
+        check(
+            "自动链排除缺 Key 的云端模型",
+            "qwen" not in chain and "doubao" not in chain and "kimi" not in chain,
+            str(chain),
+        )
+        check("自动链包含本地/内网模型", "nei" in chain, str(chain))
 
     # self-hosted endpoints on the LAN must not be reported as "missing key"
     check("内网地址视为本地", reloaded.model("nei").is_local is True)

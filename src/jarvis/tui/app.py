@@ -20,6 +20,7 @@ from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.events import Click
 from textual.widgets import Header, Input, Static
 
 from .. import __version__
@@ -49,6 +50,10 @@ from .widgets import (
     UserMessage,
     menu_head,
 )
+
+# The collapsed right panel's handle: an arrow pointing at where the panel
+# will appear, kept ASCII-adjacent so it renders in any Windows terminal.
+SIDE_RAIL = "◀"
 
 __all__ = ["JarvisApp", "split_flags"]
 
@@ -143,7 +148,11 @@ class JarvisApp(CommandMixin, App[None]):
             with VerticalScroll(id="chat"):
                 yield Banner(id="banner")
             with Vertical(id="side", classes="hidden"):
+                yield Static("系统面板 · 点击收起", id="side-head", markup=False)
                 yield Static("系统面板已收起 · Ctrl+S 打开", id="syspanel", markup=False)
+            # Click target for the collapsed panel: #side is display:none, so
+            # the handle has to live outside it.
+            yield Static(SIDE_RAIL, id="side-rail", markup=False)
         yield Input(placeholder="问我任何事，或输入 /help（Ctrl+B 打开命令菜单）", id="prompt")
 
     def on_mount(self) -> None:
@@ -591,6 +600,28 @@ class JarvisApp(CommandMixin, App[None]):
     def action_toggle_side(self) -> None:
         if not self.panel.toggle():
             self._focus_prompt()
+
+    # ------------------------------------------------------------ click to open
+    # Both sidebars can be opened and closed with the mouse: each one has a
+    # handle that is only on screen in the state where clicking it makes sense
+    # (the rail when closed, the header when open), so one click never means
+    # two things.
+    @on(Click, "#menu-rail")
+    def _on_menu_rail_click(self, event: Click) -> None:
+        self.action_toggle_menu()
+
+    @on(Click, "#menu-head")
+    def _on_menu_head_click(self, event: Click) -> None:
+        self._collapse_menu()
+
+    @on(Click, "#side-rail")
+    def _on_side_rail_click(self, event: Click) -> None:
+        self.action_toggle_side()
+
+    @on(Click, "#side-head")
+    def _on_side_head_click(self, event: Click) -> None:
+        if not self.panel.side_hidden():
+            self.action_toggle_side()
 
     def action_cancel(self) -> None:
         if not self._busy:

@@ -426,7 +426,9 @@ def menu_head() -> str:
 
     return "\n".join(
         [
-            "菜单 · Ctrl+B 收起",
+            # The head doubles as the collapse button when the menu is open:
+            # the rail (≡) is the mirror image, only there when it is closed.
+            "菜单 · 点击收起 · Ctrl+B",
             "↑↓ 选择 · Enter 执行",
             "F1 帮助 · F2 任务",
             "Ctrl+S 面板 · Ctrl+Q 退出",
