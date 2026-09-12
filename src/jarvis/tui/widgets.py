@@ -91,7 +91,7 @@ class ThinkingView(Collapsible):
         self._body = Static("", markup=False, classes="thinking-body")
         super().__init__(
             self._body,
-            title="🧠 思考过程",
+            title="思考过程",
             collapsed=True,
             classes="thinking",
             **kwargs,
@@ -109,7 +109,7 @@ class ThinkingView(Collapsible):
 
         chars = len(self.buffer)
         if chars:
-            self.title = f"🧠 思考过程（{chars} 字，点击展开）"
+            self.title = f"思考过程（{chars} 字）"
 
 
 TOOL_RESULT_LIMIT = 12  # lines of tool output kept inside the collapsed body
@@ -165,6 +165,12 @@ class ToolCallView(Collapsible):
         title = f"{mark} ⚙ {self.tool_name}"
         if self._detail:
             title += f"  {self._detail}"
+        summary = self._output_summary()
+        if summary:
+            # One-line answer of the call, right in the overview: most tool
+            # results (echo, search hit count, ok/fail) are readable at a
+            # glance without expanding anything.
+            title += f"  →  {summary}"
         self.title = title
         self.set_class(self._status == "bad", "bad")
 
@@ -178,6 +184,17 @@ class ToolCallView(Collapsible):
                 kept += f"\n… 还有 {len(body_lines) - TOOL_RESULT_LIMIT} 行（已省略）"
             lines.append("结果\n" + kept)
         self._body.update("\n".join(lines))
+
+    def _output_summary(self) -> str:
+        """First meaningful line of the output, clipped to overview width."""
+
+        if not self._output:
+            return ""
+        for line in self._output.splitlines():
+            stripped = line.strip()
+            if stripped:
+                return clip(stripped, 48)
+        return ""
 
     def set_result(self, output: str, ok: bool) -> None:
         """Record the tool result and re-render in finished form."""

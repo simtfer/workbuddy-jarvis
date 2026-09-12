@@ -414,6 +414,10 @@ async def main() -> int:
             thinking_view = app._thinking_widget
             check("思考块已渲染", isinstance(thinking_view, ThinkingView))
             check("思考块默认折叠", thinking_view is not None and thinking_view.collapsed is True)
+            check("思考块标题无 emoji", thinking_view is not None and "🧠" not in thinking_view.title)
+            check("思考块紧凑无空行",
+                  thinking_view is not None and tuple(thinking_view.styles.margin)[0] == 0,
+                  f"margin={thinking_view.styles.margin if thinking_view else None}")
             body = thinking_view.query_one(".thinking-body")
             check("思考内容完整累积", "先想想 用户要的是什么……有眉目了" in str(body.content))
             check("折叠时正文不占聊天区",
@@ -454,6 +458,7 @@ async def main() -> int:
             )
             await pilot.pause()
             check("工具结果显示完成态", "✓" in tool_view.title)
+            check("工具概览带结果摘要", "→" in tool_view.title and "hi" in tool_view.title.split("→", 1)[1])
             check("工具结果进折叠体", "hi" in str(tool_body.content))
             check("完成后视图指针复位", app._tool_view is None)
 

@@ -118,6 +118,9 @@ class JarvisApp(App[None]):
         margin: 1 0 0 0; padding: 0 1; border-left: solid $panel;
         background: $panel 20%;
     }
+    /* Collapsed blocks sit flush under whatever is above (tool rows, another
+       thinking block); only an expanded block keeps the breathing room. */
+    .thinking.-collapsed { margin-top: 0; padding-bottom: 0; }
     .thinking-body { color: $text-muted; padding: 0 0 1 0; }
     .tool-call { margin-top: 1; background: transparent; border-top: none; }
     /* Collapsed tool blocks sit directly under each other - Collapsible's
