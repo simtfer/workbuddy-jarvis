@@ -434,7 +434,8 @@ class Agent:
                 client.stream(
                     messages,
                     tools=tools,
-                    on_delta=lambda text: queue.put_nowait(text),
+                    on_delta=lambda text: queue.put_nowait(("text", text)),
+                    on_reasoning=lambda text: queue.put_nowait(("reasoning", text)),
                 )
             )
             task.add_done_callback(lambda _t: queue.put_nowait(_QUEUE_END))
@@ -443,7 +444,14 @@ class Agent:
                 item = await queue.get()
                 if item is _QUEUE_END:
                     break
-                yield {"type": "text", "text": item}
+                # The thinking stream uses a ``delta`` key (not ``text``) so the
+                # plan/learn text accumulators, which read ``event["text"]``,
+                # never swallow chain-of-thought fragments.
+                kind, text = item
+                if kind == "reasoning":
+                    yield {"type": "thinking", "delta": text}
+                else:
+                    yield {"type": "text", "text": text}
 
             try:
                 self._last_result = await task

@@ -39,6 +39,7 @@ class ToolCall:
 @dataclass
 class StreamResult:
     content: str = ""
+    reasoning: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
     finish_reason: str | None = None
     degraded: bool = False
@@ -69,17 +70,23 @@ class LLMClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         on_delta: Callable[[str], None] | None = None,
+        on_reasoning: Callable[[str], None] | None = None,
     ) -> StreamResult:
-        """Stream one completion, forwarding text deltas to ``on_delta``."""
+        """Stream one completion, forwarding text/reasoning deltas to callbacks.
+
+        ``on_reasoning`` receives the chain-of-thought stream that reasoning
+        models (DeepSeek-R1 style ``reasoning_content``, OpenRouter style
+        ``reasoning``) emit before the visible answer.
+        """
 
         try:
-            return await self._stream_once(messages, tools, on_delta)
+            return await self._stream_once(messages, tools, on_delta, on_reasoning)
         except Exception as exc:  # noqa: BLE001
             message = str(exc)
             if tools and self._looks_like_tool_issue(message):
                 # Endpoint rejected the tool schema - retry as plain chat.
                 self.tools_supported = False
-                result = await self._stream_once(messages, None, on_delta)
+                result = await self._stream_once(messages, None, on_delta, on_reasoning)
                 result.content = (
                     "[提示] 当前模型不支持工具调用，已降级为纯对话模式。\n\n" + result.content
                 )
@@ -108,6 +115,7 @@ class LLMClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None,
         on_delta: Callable[[str], None] | None,
+        on_reasoning: Callable[[str], None] | None = None,
     ) -> StreamResult:
         kwargs: dict[str, Any] = {
             "model": self.cfg.model,
@@ -129,6 +137,16 @@ class LLMClient:
                     continue
                 choice = chunk.choices[0]
                 delta = choice.delta
+                # Reasoning models ship their chain of thought as a separate
+                # delta field (DeepSeek: reasoning_content; OpenRouter: reasoning).
+                # ``getattr`` because the openai SDK does not type these extras.
+                reasoning_delta = getattr(delta, "reasoning_content", None) or getattr(
+                    delta, "reasoning", None
+                )
+                if reasoning_delta:
+                    result.reasoning += reasoning_delta
+                    if on_reasoning is not None:
+                        on_reasoning(reasoning_delta)
                 if getattr(delta, "content", None):
                     result.content += delta.content
                     if on_delta is not None:

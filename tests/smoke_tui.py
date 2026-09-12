@@ -16,7 +16,7 @@ from jarvis.config import build_default_config, load_config
 from jarvis.core.agent import ConfirmRequest
 from jarvis.tui.app import JarvisApp
 from jarvis.tui.screens import ConfirmScreen, HelpScreen, ModelPickerScreen
-from jarvis.tui.widgets import MENU, MENU_CONTENT, CommandMenu
+from jarvis.tui.widgets import MENU, MENU_CONTENT, CommandMenu, ThinkingView
 
 # Dump every thread's stack if the test wedges, so a hang is never a mystery.
 # The budget is generous because each command waits for the app to look idle,
@@ -404,6 +404,35 @@ async def main() -> int:
             check("subagent_final 渲染汇总",
                   any("🏁" in str(getattr(c, "content", "")) and "全部结束" in str(getattr(c, "content", ""))
                       for c in chat.children))
+
+            # --------------------------------------------------- thinking stream
+            chat = app.query_one("#chat")
+            before = len(chat.children)
+            for piece in ("先想想 ", "用户要的是什么", "……有眉目了"):
+                await app._handle_event({"type": "thinking", "delta": piece})
+            await pilot.pause()
+            thinking_view = app._thinking_widget
+            check("思考块已渲染", isinstance(thinking_view, ThinkingView))
+            check("思考块默认折叠", thinking_view is not None and thinking_view.collapsed is True)
+            body = thinking_view.query_one(".thinking-body")
+            check("思考内容完整累积", "先想想 用户要的是什么……有眉目了" in str(body.content))
+            check("折叠时正文不占聊天区",
+                  not any("先想想" in str(getattr(c, "content", "")) for c in chat.children[before:] if not isinstance(c, ThinkingView)))
+
+            await app._handle_event({"type": "text", "text": "答案是 42。"})
+            await pilot.pause()
+            check("正文开始即封存思考块", app._thinking_widget is None)
+            check("思考块标题带字数", "字" in thinking_view.title)
+
+            # A second model round (after a tool call) gets a fresh block.
+            await app._handle_event({"type": "tool_start", "name": "echo_test", "arguments": {}})
+            await app._handle_event({"type": "thinking", "delta": "再看一眼。"})
+            await pilot.pause()
+            check("新一轮思考另起新块",
+                  isinstance(app._thinking_widget, ThinkingView) and app._thinking_widget is not thinking_view)
+            await app._handle_event({"type": "done"})
+            await pilot.pause()
+            check("done 后思考块封存", app._thinking_widget is None)
 
             # ------------------------------------------------------- modals etc.
             request = ConfirmRequest(tool="run_shell", arguments={"command": "echo hi"}, hint="test")

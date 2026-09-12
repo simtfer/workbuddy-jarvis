@@ -38,6 +38,7 @@ from .widgets import (
     MENU_WIDTH,
     Notice,
     PlanView,
+    ThinkingView,
     ToolCallView,
     ToolResultView,
     UserMessage,
@@ -114,6 +115,11 @@ class JarvisApp(App[None]):
         padding: 0 1; margin: 1 0 0 0;
     }
     .assistant-message { margin: 1 0 0 0; padding: 0 1; background: transparent; }
+    .thinking {
+        margin: 1 0 0 0; padding: 0 1; border-left: solid $panel;
+        background: $panel 20%;
+    }
+    .thinking-body { color: $text-muted; padding: 0 0 1 0; }
     .tool-call { color: $warning; padding: 0 1; margin-top: 1; }
     .tool-result { color: $text-muted; padding: 0 1 0 3; }
     .tool-result.bad { color: $error; }
@@ -169,6 +175,7 @@ class JarvisApp(App[None]):
 
         self._session_allow: set[str] = set()
         self._stream_widget: AssistantMessage | None = None
+        self._thinking_widget: ThinkingView | None = None
         self._plan_view: PlanView | None = None
         self._busy = False
         self._panel_busy = False
@@ -346,6 +353,7 @@ class JarvisApp(App[None]):
         self._busy = True
         self._tool_count = 0
         self._stream_widget = None
+        self._thinking_widget = None
         started = time.monotonic()
         try:
             async for event in factory():
@@ -359,6 +367,9 @@ class JarvisApp(App[None]):
         finally:
             self._busy = False
             self._stream_widget = None
+            if self._thinking_widget is not None:
+                self._thinking_widget.finish()
+                self._thinking_widget = None
             elapsed = time.monotonic() - started
             if self._tool_count:
                 await self._append(
@@ -367,7 +378,19 @@ class JarvisApp(App[None]):
 
     async def _handle_event(self, event: dict[str, Any]) -> None:
         kind = event.get("type")
-        if kind == "text":
+        if kind == "thinking":
+            # Chain-of-thought stream from a reasoning model. One collapsed
+            # block per model round: a fresh one is created after every tool
+            # call, mirroring how the model re-thinks between rounds.
+            if self._thinking_widget is None:
+                self._thinking_widget = ThinkingView()
+                await self._append(self._thinking_widget)
+            self._thinking_widget.append_text(event["delta"])
+        elif kind == "text":
+            if self._thinking_widget is not None:
+                # The visible answer started, so this thinking round is over.
+                self._thinking_widget.finish()
+                self._thinking_widget = None
             if self._stream_widget is None:
                 self._stream_widget = AssistantMessage()
                 await self._append(self._stream_widget)
@@ -379,12 +402,14 @@ class JarvisApp(App[None]):
                 self._stream_widget.buffer += event["text"]
         elif kind == "tool_start":
             self._stream_widget = None
+            self._close_thinking()
             self._tool_count += 1
             args = event.get("arguments") or {}
             detail = str(args.get("command") or args.get("path") or "")[:90]
             await self._append(ToolCallView(event["name"], detail))
         elif kind == "tool_result":
             self._stream_widget = None
+            self._close_thinking()
             await self._append(
                 ToolResultView(event["name"], event["output"], bool(event.get("ok")))
             )
@@ -463,10 +488,19 @@ class JarvisApp(App[None]):
             pass
         elif kind == "error":
             self._stream_widget = None
+            self._close_thinking()
             await self._append(Notice(event["message"], "bad"))
         elif kind == "done":
+            self._close_thinking()
             if self._stream_widget is not None:
                 await self._stream_widget.append_text("")
+
+    def _close_thinking(self) -> None:
+        """Seal the current thinking block; the next round gets a fresh one."""
+
+        if self._thinking_widget is not None:
+            self._thinking_widget.finish()
+            self._thinking_widget = None
 
     # -------------------------------------------------------------- permission
     async def _confirm(self, request: ConfirmRequest) -> bool:
@@ -1233,6 +1267,7 @@ class JarvisApp(App[None]):
         await chat.mount(Banner(id="banner"))
         self._plan_view = None
         self._stream_widget = None
+        self._thinking_widget = None
 
     def action_toggle_menu(self) -> None:
         """Collapse / expand the left command menu (Ctrl+B)."""

@@ -51,7 +51,7 @@ class TextClient:
         self.text = text
         self.tools_supported = True
 
-    async def stream(self, messages, tools=None, on_delta=None):
+    async def stream(self, messages, tools=None, on_delta=None, on_reasoning=None):
         if on_delta:
             for index in range(0, len(self.text), 8):
                 on_delta(self.text[index : index + 8])
@@ -68,7 +68,7 @@ class FailClient:
         self.message = message
         self.tools_supported = True
 
-    async def stream(self, messages, tools=None, on_delta=None):
+    async def stream(self, messages, tools=None, on_delta=None, on_reasoning=None):
         raise LLMError(self.message)
 
     async def aclose(self) -> None:

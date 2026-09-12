@@ -49,7 +49,7 @@ class FakeClient:
     async def aclose(self) -> None:
         return None
 
-    async def stream(self, messages, tools=None, on_delta=None):
+    async def stream(self, messages, tools=None, on_delta=None, on_reasoning=None):
         idx = min(self.calls, len(self.replies) - 1)
         self.calls += 1
         await asyncio.sleep(self.delays[idx])
@@ -221,7 +221,7 @@ def test_max_concurrent_signal() -> None:
         class CountingClient:
             async def aclose(self) -> None:
                 return None
-            async def stream(self, messages, tools=None, on_delta=None):
+            async def stream(self, messages, tools=None, on_delta=None, on_reasoning=None):
                 state["current"] += 1
                 state["peak"] = max(state["peak"], state["current"])
                 await barrier.wait()

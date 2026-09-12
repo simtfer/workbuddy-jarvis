@@ -49,10 +49,13 @@ class FakeClient:
         self.calls: list[dict] = []
         self.tools_supported = True
 
-    async def stream(self, messages, tools=None, on_delta=None):
+    async def stream(self, messages, tools=None, on_delta=None, on_reasoning=None):
         self.calls.append({"messages": messages, "tools": tools})
         reply = self.replies.pop(0) if self.replies else ""
         if isinstance(reply, StreamResult):
+            if on_reasoning and reply.reasoning:
+                for index in range(0, len(reply.reasoning), 10):
+                    on_reasoning(reply.reasoning[index : index + 10])
             if on_delta and reply.content:
                 on_delta(reply.content)
             return reply
@@ -311,6 +314,38 @@ def test_agent_tools() -> None:
     asyncio.run(agent.aclose())
 
 
+def test_agent_thinking() -> None:
+    """Reasoning-model thinking stream: thinking events flow, text stays clean."""
+    agent, _client = make_agent(
+        [StreamResult(content="答案是 42。", reasoning="用户在问终极问题，我需要……先算一下。")]
+    )
+
+    async def run() -> None:
+        events = [event async for event in agent.run("终极问题")]
+        kinds = [event["type"] for event in events]
+        thinking = [e for e in events if e["type"] == "thinking"]
+        check("thinking 事件存在", len(thinking) > 0, str(kinds))
+        check(
+            "thinking 事件带 delta 而非 text 键",
+            all("delta" in e and "text" not in e for e in thinking),
+        )
+        check(
+            "thinking 增量拼回完整思考",
+            "".join(e["delta"] for e in thinking) == "用户在问终极问题，我需要……先算一下。",
+        )
+        check(
+            "text 累积不被思考污染",
+            "".join(e.get("text", "") for e in events) == "答案是 42。",
+        )
+        first_thinking = next(i for i, e in enumerate(events) if e["type"] == "thinking")
+        first_text = next(i for i, e in enumerate(events) if e["type"] == "text")
+        check("thinking 先于正文", first_thinking < first_text)
+        check("思考不进上下文历史", all("reasoning" not in str(m) for m in agent.messages))
+
+    asyncio.run(run())
+    asyncio.run(agent.aclose())
+
+
 def test_agent_confirmation() -> None:
     agent, _client = make_agent(
         [
@@ -405,6 +440,7 @@ def main() -> int:
             test_task_parsing()
             test_agent_plan(tmp)
             test_agent_tools()
+            test_agent_thinking()
             test_agent_confirmation()
             test_agent_facts_prompt(tmp, store)
             test_hotkey()

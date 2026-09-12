@@ -7,7 +7,7 @@ from typing import Any
 from textual import events, on
 from textual.binding import Binding
 from textual.message import Message
-from textual.widgets import Markdown, OptionList, Static
+from textual.widgets import Collapsible, Markdown, OptionList, Static
 from textual.widgets.option_list import Option
 
 from ..textwidth import clip, dwidth, pad
@@ -71,6 +71,44 @@ class AssistantMessage(Markdown):
     async def append_text(self, text: str) -> None:
         self.buffer += text
         await self.update(self.buffer or "…")
+
+
+class ThinkingView(Collapsible):
+    """The model's chain of thought, tucked away behind a collapsed header.
+
+    Reasoning models (DeepSeek-R1 and friends) stream their thinking before the
+    answer. It is genuinely useful on demand and pure noise at a glance, so the
+    block starts collapsed; click the title (or focus + Enter) to expand.
+
+    Note: do NOT override ``compose`` here - ``Collapsible.compose`` yields the
+    title row plus a ``Contents`` wrapper, and replacing it would drop the
+    toggle header entirely. The body is passed in as a constructor child so it
+    lands inside ``Contents`` automatically.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        self._body = Static("", markup=False, classes="thinking-body")
+        super().__init__(
+            self._body,
+            title="🧠 思考过程",
+            collapsed=True,
+            classes="thinking",
+            **kwargs,
+        )
+        self.buffer = ""
+
+    def append_text(self, text: str) -> None:
+        """Accumulate reasoning deltas. Cheap: the body is hidden while collapsed."""
+
+        self.buffer += text
+        self._body.update(self.buffer)
+
+    def finish(self) -> None:
+        """Stamp the final length onto the title once the round is over."""
+
+        chars = len(self.buffer)
+        if chars:
+            self.title = f"🧠 思考过程（{chars} 字，点击展开）"
 
 
 class ToolCallView(Static):

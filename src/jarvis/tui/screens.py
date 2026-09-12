@@ -209,6 +209,11 @@ JARVIS-Win · Phase 4
   主 Agent 会在用户的问题天然可拆成 N 个互不依赖子任务时，自动调用
   delegate_subagents 并行派给子 Agent（每个独立对话、共享工具与数据库）。
   超时（默认 30s）后先把已完成的部分输出，剩下的继续跑完再追加最终汇总。
+
+思考过程
+  推理模型（DeepSeek-R1 等）输出的思考流会显示在回答上方的
+  「🧠 思考过程」折叠块里——默认收起只占一行，点击标题即可展开；
+  每一轮工具调用各有一块。普通模型没有这个流，界面不受影响。
   配置在 config.toml 的 [subagents]：default_timeout / max_runtime /
   max_concurrent / max_per_call。
 
