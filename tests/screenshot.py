@@ -69,6 +69,13 @@ async def main() -> None:
     async with app.run_test(size=(132, 44)) as pilot:
         await pilot.pause()
 
+        # Both sidebars start collapsed, so the snapshot opens them the way
+        # Ctrl+B / Ctrl+S would - otherwise the picture is just a chat window.
+        app.action_toggle_menu()
+        app.action_toggle_side()
+        await asyncio.sleep(2.5)  # the system panel samples on a worker thread
+        await pilot.pause()
+
         await app._append(UserMessage(QUERY))
         await app._append(ToolCallView("web_search", 'query="今天 AI 领域有什么值得关注的动态", max_results=4'))
         await app._append(ToolResultView("web_search", RESULTS, True))
@@ -83,6 +90,7 @@ async def main() -> None:
         await app._append(ToolCallView("list_processes", 'sort_by="cpu", limit=5'))
         await app._append(ToolResultView("list_processes", PROCESSES, True))
 
+        app._focus_prompt()
         await pilot.pause()
         OUT.parent.mkdir(parents=True, exist_ok=True)
         svg = app.export_screenshot()

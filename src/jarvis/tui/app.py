@@ -14,7 +14,7 @@ from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Footer, Header, Input, Static
+from textual.widgets import Header, Input, Static
 
 from .. import __version__
 from ..config import Config, load_config
@@ -30,11 +30,18 @@ from ..tools import procman, web
 from .screens import ConfirmScreen, HelpScreen, ModelPickerScreen
 from .widgets import (
     AssistantMessage,
+    Banner,
+    CommandMenu,
+    MenuCommand,
+    MenuDismiss,
+    MENU_RAIL_WIDTH,
+    MENU_WIDTH,
     Notice,
     PlanView,
     ToolCallView,
     ToolResultView,
     UserMessage,
+    menu_head,
 )
 
 
@@ -63,17 +70,8 @@ def split_flags(text: str) -> tuple[list[str], dict[str, str]]:
     return positional, flags
 
 
-# figlet "ansi_shadow" of JARVIS. Every line is exactly 44 cells wide and the
-# glyphs only line up at that exact shape - re-indenting or re-wrapping it makes
-# the "J" drift away from its own bowl, which is what a crooked banner looks like.
-BANNER = r"""
-     ██╗ █████╗ ██████╗ ██╗   ██╗██╗███████╗
-     ██║██╔══██╗██╔══██╗██║   ██║██║██╔════╝
-     ██║███████║██████╔╝██║   ██║██║███████╗
-██   ██║██╔══██║██╔══██╗╚██╗ ██╔╝██║╚════██║
-╚█████╔╝██║  ██║██║  ██║ ╚████╔╝ ██║███████║
- ╚════╝ ╚═╝  ╚═╝╚═╝  ╚═╝  ╚═══╝  ╚═╝╚══════╝
-""".strip("\n")
+# figlet "ansi_shadow" of JARVIS lives in widgets.py with the Banner widget that
+# falls back to a compact wordmark when the chat pane is too narrow for it.
 
 
 class JarvisApp(App[None]):
@@ -87,8 +85,24 @@ class JarvisApp(App[None]):
     # caret somewhere the user cannot type.
     AUTO_FOCUS = "#prompt"
 
+    # The sidebar geometry lives in widgets.py (the rows are padded to those
+    # numbers), so the CSS widths are spliced in rather than typed twice.
     CSS = """
     #body { height: 1fr; }
+    #menu {
+        width: __MENU_WIDTH__; padding: 0 1; border-right: solid $panel;
+        color: $text-muted; background: transparent;
+    }
+    #menu.collapsed { width: __MENU_RAIL_WIDTH__; padding: 0 0; }
+    #menu-rail { display: none; color: $accent; padding: 1 0 0 1; }
+    #menu.collapsed #menu-rail { display: block; }
+    #menu-box { height: 1fr; }
+    #menu.collapsed #menu-box { display: none; }
+    #menu-head { color: $text-muted; padding: 0 0 1 0; }
+    #menu-list {
+        height: 1fr; border: none; padding: 0; background: transparent;
+    }
+    #menu-list:focus { border: none; }
     #chat { width: 1fr; padding: 0 1; scrollbar-size-vertical: 1; }
     #side {
         width: 46; padding: 0 1; border-left: solid $panel; color: $text-muted;
@@ -110,11 +124,14 @@ class JarvisApp(App[None]):
         color: $accent; border: round $accent 40%; padding: 0 1; margin-top: 1;
     }
     #prompt { dock: bottom; }
-    """
+    """.replace("__MENU_WIDTH__", str(MENU_WIDTH)).replace(
+        "__MENU_RAIL_WIDTH__", str(MENU_RAIL_WIDTH)
+    )
 
     BINDINGS = [
         Binding("ctrl+q", "quit", "退出"),
         Binding("ctrl+l", "clear_chat", "清屏"),
+        Binding("ctrl+b", "toggle_menu", "命令菜单"),
         Binding("ctrl+s", "toggle_side", "系统面板"),
         Binding("ctrl+x", "cancel", "取消任务"),
         Binding("f1", "help", "帮助"),
@@ -165,25 +182,35 @@ class JarvisApp(App[None]):
 
     # ---------------------------------------------------------------- lifecycle
     def compose(self) -> ComposeResult:
+        """Left menu, chat, right system panel - the two sidebars start collapsed.
+
+        The menu replaced the key-hint footer, so the hints live in its head
+        block; the panels start out of the way because the chat is the point.
+        """
+
         yield Header(show_clock=True)
         with Horizontal(id="body"):
+            with Vertical(id="menu", classes="collapsed"):
+                yield Static("≡", id="menu-rail", markup=False)
+                with Vertical(id="menu-box"):
+                    yield Static(menu_head(), id="menu-head", markup=False)
+                    yield CommandMenu(id="menu-list")
             with VerticalScroll(id="chat"):
-                yield Static(BANNER, id="banner", markup=False)
-            with Vertical(id="side"):
-                yield Static("正在采集系统状态…", id="syspanel", markup=False)
-        yield Input(placeholder="问我任何事，或输入 /help 查看命令", id="prompt")
-        yield Footer()
+                yield Banner(id="banner")
+            with Vertical(id="side", classes="hidden"):
+                yield Static("系统面板已收起 · Ctrl+S 打开", id="syspanel", markup=False)
+        yield Input(placeholder="问我任何事，或输入 /help（Ctrl+B 打开命令菜单）", id="prompt")
 
     def on_mount(self) -> None:
         self.theme = "textual-dark"
         self._focus_prompt()
-        self._refresh_panel_now()
-        self._render_panel()
         self.set_interval(2.0, self._refresh_panel)
         # Walking every process is much more expensive than the metrics above,
         # so the TOP 进程 table refreshes on its own, slower clock.
         self.set_interval(10.0, self._refresh_processes)
-        self._refresh_processes()
+        if not self._side_hidden():
+            self._refresh_panel()
+            self._refresh_processes()
         if self.scheduler is not None:
             self.scheduler.on_error = self._on_schedule_error
             self.scheduler.start()
@@ -227,7 +254,8 @@ class JarvisApp(App[None]):
         await self._append(
             Notice(
                 f"JARVIS 已就绪 · 模型 {model.display}（{model.model}） · "
-                f"工具 {len(self.registry.tools)} 个 · 记忆 {self.store.fact_count()} 条",
+                f"工具 {len(self.registry.tools)} 个 · 记忆 {self.store.fact_count()} 条"
+                "\nCtrl+B 打开左侧命令菜单 · Ctrl+S 打开系统面板（两个侧栏默认都收起）",
                 "info",
             )
         )
@@ -1154,12 +1182,85 @@ class JarvisApp(App[None]):
     async def action_clear_chat(self) -> None:
         chat = self.query_one("#chat", VerticalScroll)
         await chat.remove_children()
-        await chat.mount(Static(BANNER, id="banner", markup=False))
+        await chat.mount(Banner(id="banner"))
         self._plan_view = None
         self._stream_widget = None
 
+    def action_toggle_menu(self) -> None:
+        """Collapse / expand the left command menu (Ctrl+B)."""
+
+        menu = self.query_one("#menu")
+        menu.toggle_class("collapsed")
+        if menu.has_class("collapsed"):
+            self._focus_prompt()
+            return
+        try:
+            self.query_one("#menu-list", CommandMenu).focus()
+        except Exception:  # noqa: BLE001 - never wedge the key on a missing widget
+            self._focus_prompt()
+
+    def _collapse_menu(self) -> None:
+        self.query_one("#menu").add_class("collapsed")
+
+    @on(MenuCommand)
+    async def _on_menu_command(self, event: MenuCommand) -> None:
+        """Run a menu row, then hand the caret back to the prompt.
+
+        Selecting from the menu puts it away again: the chat is the normal state,
+        and the command it runs is echoed like any other slash command.
+        """
+
+        event.stop()
+        self._collapse_menu()
+        self._focus_prompt()
+        await self._run_command(event.command)
+
+    @on(MenuDismiss)
+    def _on_menu_dismiss(self, event: MenuDismiss) -> None:
+        event.stop()
+        self._collapse_menu()
+        self._focus_prompt()
+
+    def _side_hidden(self) -> bool:
+        try:
+            return self.query_one("#side").has_class("hidden")
+        except Exception:  # noqa: BLE001 - during teardown the widget is gone
+            return True
+
     def action_toggle_side(self) -> None:
-        self.query_one("#side").toggle_class("hidden")
+        side = self.query_one("#side")
+        side.toggle_class("hidden")
+        if side.has_class("hidden"):
+            self._focus_prompt()
+            return
+        # Sample on open: while the panel is collapsed its timers stay quiet, so
+        # the numbers would otherwise be missing (or stale) on the first look.
+        self._set_panel_text("正在采集系统状态…")
+        self.run_worker(self._sample_panel(), group="panel-open", exclusive=True)
+
+    async def _sample_panel(self) -> None:
+        """Fetch both halves of the panel, cheap metrics first.
+
+        One worker, not two racing: the process walk holds the shared psutil lock
+        for seconds, so starting it alongside the metrics can delay exactly the
+        numbers the user just opened the panel to see.
+        """
+
+        if self._panel_busy or self._top_busy:
+            return
+        self._top_busy = True
+        try:
+            await self._refresh_panel_async()
+            if not self._side_hidden():
+                await self._refresh_processes_async()
+        finally:
+            self._top_busy = False
+
+    def _set_panel_text(self, text: str) -> None:
+        try:
+            self.query_one("#syspanel", Static).update(text)
+        except Exception:  # noqa: BLE001 - cosmetic
+            pass
 
     def action_cancel(self) -> None:
         if not self._busy:
@@ -1186,21 +1287,14 @@ class JarvisApp(App[None]):
         Walking every process with psutil costs seconds on a busy machine, so
         the process table has its own slower timer (:meth:`_refresh_processes`).
         Both run in worker threads: a slow sample can never freeze the window.
+        Both also stand down while the panel is collapsed - nobody can see the
+        numbers, so sampling them is pure waste.
         """
 
-        if self._panel_busy:
+        if self._side_hidden() or self._panel_busy:
             return
         self._panel_busy = True
         self.run_worker(self._refresh_panel_async(), group="panel", exclusive=True)
-
-    def _refresh_panel_now(self) -> None:
-        """Synchronous first paint (before the app is interactive)."""
-
-        try:
-            data = sysinfo.snapshot(include_processes=0)
-        except Exception:  # noqa: BLE001 - panel is cosmetic, never crash the UI
-            return
-        self._panel_data = data
 
     async def _refresh_panel_async(self) -> None:
         try:
@@ -1213,9 +1307,14 @@ class JarvisApp(App[None]):
         self._render_panel()
 
     def _refresh_processes(self) -> None:
-        """Timer tick: refresh the (expensive) TOP 进程 table."""
+        """Timer tick: refresh the (expensive) TOP 进程 table.
 
-        if self._top_busy:
+        Yields to the cheap panel metrics: the process walk holds the shared
+        psutil lock for seconds, and queueing it in front of the 2s metrics would
+        stall the panel the user is looking at.
+        """
+
+        if self._side_hidden() or self._top_busy or self._panel_busy:
             return
         self._top_busy = True
         self.run_worker(self._refresh_processes_async(), group="top", exclusive=True)

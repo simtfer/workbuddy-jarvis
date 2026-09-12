@@ -1,6 +1,6 @@
 [project]
 name = "jarvis"
-version = "0.4.0"
+version = "0.5.0"
 description = "JARVIS-Win - a resident AI assistant for Windows with a Textual TUI"
 readme = "README.md"
 authors = [

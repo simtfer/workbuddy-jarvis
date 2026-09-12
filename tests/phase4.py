@@ -314,7 +314,7 @@ def test_layout() -> None:
     """
 
     from jarvis import textwidth
-    from jarvis.tui.app import BANNER
+    from jarvis.tui.widgets import BANNER, BANNER_COMPACT, MENU, MENU_CONTENT, MENU_LABEL
 
     rows = [line for line in BANNER.splitlines() if line.strip()]
     widths = sorted({textwidth.dwidth(line) for line in rows})
@@ -327,6 +327,25 @@ def test_layout() -> None:
     # made the banner look crooked.
     corners = {rows[0].index("╗"), rows[3].index("║"), rows[4].index("╝")}
     check("J 的竖笔与底部在同一列", corners == {7}, str(sorted(corners)))
+    # With both sidebars open a 120-column terminal leaves 42 cells, so the art
+    # has to give way to the one-line wordmark instead of wrapping into noise.
+    check("窄栏有备用横幅", textwidth.dwidth(BANNER_COMPACT) < 42,
+          f"{textwidth.dwidth(BANNER_COMPACT)} 格")
+
+    # Left menu rows: same cell arithmetic, plus the widths the app's CSS splices.
+    labels = [entry[0] for _section, entries in MENU for entry in entries]
+    widest_label = max(textwidth.dwidth(label) for label in labels)
+    check("菜单标签放得进标签列", widest_label <= MENU_LABEL,
+          f"{widest_label} / {MENU_LABEL} 格")
+    # A row is pad(label, MENU_LABEL) + hint, so the wide label column, not the
+    # longest label, decides whether it fits.
+    widest_hint = max(
+        textwidth.dwidth(entry[2] if len(entry) > 2 else entry[1])
+        for _section, entries in MENU
+        for entry in entries
+    )
+    check("菜单行放得进侧栏", MENU_LABEL + widest_hint <= MENU_CONTENT,
+          f"最宽行 {MENU_LABEL + widest_hint} / {MENU_CONTENT} 格")
 
     check("汉字算 2 格", textwidth.dwidth("中文") == 4, str(textwidth.dwidth("中文")))
     check("ASCII 算 1 格", textwidth.dwidth("abc") == 3, str(textwidth.dwidth("abc")))

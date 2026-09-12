@@ -15,7 +15,8 @@ from jarvis import textwidth
 from jarvis.config import build_default_config, load_config
 from jarvis.core.agent import ConfirmRequest
 from jarvis.tui.app import JarvisApp
-from jarvis.tui.screens import ConfirmScreen, ModelPickerScreen
+from jarvis.tui.screens import ConfirmScreen, HelpScreen, ModelPickerScreen
+from jarvis.tui.widgets import MENU, MENU_CONTENT, CommandMenu
 
 # Dump every thread's stack if the test wedges, so a hang is never a mystery.
 # The budget is generous because each command waits for the app to look idle,
@@ -57,7 +58,6 @@ async def main() -> int:
 
             chat = app.query_one("#chat")
             check("应用启动并挂载界面", len(chat.children) >= 1)
-            check("系统面板有内容", "CPU" in str(app.query_one("#syspanel").content))
             # The chat pane is a focusable scroll container, so the caret must be
             # placed in the prompt explicitly or typing goes nowhere.
             check(
@@ -66,15 +66,110 @@ async def main() -> int:
                 str(getattr(app.focused, "id", None) or type(app.focused).__name__),
             )
 
+            # ------------------------------------------------- layout / sidebars
+            # Both sidebars start collapsed: the chat is the reason the window is
+            # open, and the menu is a detour.
+            menu = app.query_one("#menu")
+            side = app.query_one("#side")
+            check("左侧命令菜单默认收起", menu.has_class("collapsed"))
+            check("右侧系统面板默认收起", side.has_class("hidden"))
+            check("收起时菜单只剩一条边栏", not app.query_one("#menu-box").display)
+            check("收起时面板不采集", app._panel_data is None)
+
+            app.action_toggle_side()
+            await pilot.pause()
+            await asyncio.sleep(0.8)  # the sampler runs off the UI thread
+            await pilot.pause()
+            check("Ctrl+S 展开系统面板", not side.has_class("hidden"))
+
             # The sidebar must never wrap: a line one cell past the box turns the
             # column layout into the ragged mess this test exists to prevent.
             panel = app.query_one("#syspanel")
-            panel_width = panel.content_size.width or 44
+            panel_width = panel.content_size.width or 43
             panel_lines = str(panel.content).splitlines()
             widest = max(textwidth.dwidth(line) for line in panel_lines)
             check("侧边栏不换行", widest <= panel_width, f"最宽 {widest} 格 / 面板 {panel_width} 格")
             check("侧边栏含四个分区", {"SYSTEM", "DISK", "TOP 进程", "SESSION"} <= set(panel_lines),
                   ",".join(line for line in panel_lines if line in {"SYSTEM", "DISK", "TOP 进程", "SESSION"}))
+            check("展开后采样到真实数据", "%" in str(panel.content))
+
+            app.action_toggle_side()
+            await pilot.pause()
+            check("Ctrl+S 收得起系统面板", side.has_class("hidden"))
+
+            # ------------------------------------------------------- left menu
+            menu_list = app.query_one("#menu-list", CommandMenu)
+            app.action_toggle_menu()
+            await pilot.pause()
+            check("Ctrl+B 展开菜单并聚焦列表", getattr(app.focused, "id", None) == "menu-list")
+            check("菜单宽度与常量一致", menu_list.content_size.width == MENU_CONTENT,
+                  f"{menu_list.content_size.width} / {MENU_CONTENT}")
+
+            rows = [str(option.prompt) for option in menu_list.options]
+            row_width = max(textwidth.dwidth(row) for row in rows)
+            check("菜单行不超宽", row_width <= MENU_CONTENT, f"最宽 {row_width} / {MENU_CONTENT}")
+            check("每个分区都有标题",
+                  sum(1 for row in rows if row.startswith("──")) == len(MENU),
+                  f"{sum(1 for row in rows if row.startswith('──'))} / {len(MENU)}")
+            check("分区标题不选中", all(
+                option.disabled for option in menu_list.options
+                if str(option.prompt).startswith("──")
+            ))
+
+            commands = {
+                menu_list.command_for(option.id) for option in menu_list.options
+            } - {None}
+            check("每一行都绑定了命令", len(commands) == len(rows) - len(MENU),
+                  f"{len(commands)} 个命令 / {len(rows) - len(MENU)} 行")
+            known = {"/help", "/clear", "/history", "/reset", "/model", "/provider", "/sys",
+                     "/ps", "/clip", "/tools", "/task", "/facts", "/learn", "/theme", "/quit"}
+            unknown = {cmd.split()[0] for cmd in commands} - known
+            check("菜单命令都存在", not unknown, ",".join(sorted(unknown)))
+
+            first = menu_list.options[1]
+            check("按键提示不会被当成命令", menu_list.command_for(first.id) == "/help",
+                  f"{first.prompt!r} -> {menu_list.command_for(first.id)!r}")
+
+            await pilot.press("down")
+            await pilot.pause()
+            check("方向键移动高亮", menu_list.highlighted_option.id != first.id,
+                  str(menu_list.highlighted_option.prompt))
+            await pilot.press("escape")
+            await pilot.pause()
+            check("Esc 收起菜单", menu.has_class("collapsed"))
+            check("收起后焦点回到输入框", getattr(app.focused, "id", None) == "prompt")
+
+            # Activating a row runs its command and puts the menu away again.
+            app.action_toggle_menu()
+            await pilot.pause()
+            target = next(
+                option for option in menu_list.options
+                if menu_list.command_for(option.id) == "/tools"
+            )
+            menu_list.highlighted = menu_list.get_option_index(target.id)
+            await pilot.pause()
+            before = len(chat.children)
+            await pilot.press("enter")
+            await pilot.pause()
+            await pilot.pause()
+            check("菜单项执行对应命令",
+                  len(chat.children) > before and "可用工具" in str(chat.children[-1].content),
+                  str(chat.children[-1].content)[:40])
+            check("执行后菜单自动收起", menu.has_class("collapsed"))
+            check("执行后焦点回到输入框", getattr(app.focused, "id", None) == "prompt")
+
+            # A key-bound row shows "F1" but must run /help, not the literal "F1".
+            app.action_toggle_menu()
+            await pilot.pause()
+            menu_list.highlighted = menu_list.get_option_index(first.id)
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            check("按键提示行执行的是命令", isinstance(app.screen, HelpScreen),
+                  type(app.screen).__name__)
+            await pilot.press("escape")
+            await pilot.pause()
+            check("帮助关掉后焦点回到输入框", getattr(app.focused, "id", None) == "prompt")
 
             check("调度器已启动", app.scheduler is not None)
             check("测试用的是临时配置", app.config.path.parent == db.parent)
@@ -274,9 +369,8 @@ async def main() -> int:
             await pilot.press("escape")
             check("确认弹窗拒绝生效", await answer2 is False)
 
-            app.action_toggle_side()
-            await pilot.pause()
-            check("系统面板可隐藏", app.query_one("#side").has_class("hidden"))
+            # Both sidebars are covered above (menu and panel open/close); the
+            # panel is closed there so the rest of the run stays cheap.
 
             await app.action_clear_chat()
             await pilot.pause()
