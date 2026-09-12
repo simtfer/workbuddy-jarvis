@@ -16,7 +16,14 @@ from jarvis.config import build_default_config, load_config
 from jarvis.core.agent import ConfirmRequest
 from jarvis.tui.app import JarvisApp
 from jarvis.tui.screens import ConfirmScreen, HelpScreen, ModelPickerScreen
-from jarvis.tui.widgets import MENU, MENU_CONTENT, CommandMenu, ThinkingView, ToolCallView
+from jarvis.tui.widgets import (
+    MENU,
+    MENU_CONTENT,
+    CommandMenu,
+    SubAgentOpen,
+    ThinkingView,
+    ToolCallView,
+)
 
 # Dump every thread's stack if the test wedges, so a hang is never a mystery.
 # The budget is generous because each command waits for the app to look idle,
@@ -358,52 +365,82 @@ async def main() -> int:
 
             # ------------------------------------------------- subagent events
             chat = app.query_one("#chat")
-            before = len(chat.children)
             await app._handle_event({
                 "type": "subagent_start",
                 "count": 3,
                 "prompts": ["research A", "research B", "research C"],
             })
             await pilot.pause()
-            check("subagent_start 渲染派发通知",
-                  any("派发了 3 个子任务" in str(getattr(c, "content", "")) for c in chat.children[before:]),
-                  str(len(chat.children) - before))
+            board = app._subagent_board
+            check("派发面板已渲染", board is not None)
+            check("派发面板默认折叠", board is not None and board.collapsed is True)
+            check("派发面板概览计数", board is not None and "3 个" in board.title)
+            check("派发面板概览初始 0/3", board is not None and "0/3" in board.title)
+            rows = list(board._rows.values()) if board else []
+            check("面板行数等于子任务数", len(rows) == 3)
+            check("面板行含 prompt 预览",
+                  any("research A" in str(getattr(r, "content", "")) for r in rows))
+            check("面板行初始 pending 标记",
+                  any("·" in str(getattr(r, "content", "")) for r in rows))
 
             await app._handle_event({
                 "type": "subagent_done",
                 "index": 0,
                 "status": "done",
+                "output": "A 的结论",
                 "tool_count": 2,
                 "elapsed": 1.5,
             })
             await pilot.pause()
-            check("subagent_done 渲染完成标记",
-                  any("✓" in str(getattr(c, "content", "")) and "子任务" in str(getattr(c, "content", ""))
-                      for c in chat.children))
+            check("子任务完成更新行",
+                  rows and "✓" in str(rows[0].content) and "1.5s" in str(rows[0].content))
+            check("子任务完成更新概览", board is not None and "1/3" in board.title)
+            check("子任务输出记录在面板",
+                  board is not None and board.children_state[0].get("output") == "A 的结论")
 
             await app._handle_event({
                 "type": "subagent_timeout",
                 "results": [
-                    {"index": 0, "prompt": "a", "status": "done"},
-                    {"index": 1, "prompt": "b", "status": "running"},
+                    {"index": 0, "prompt": "research A", "status": "done"},
+                    {"index": 1, "prompt": "research B", "status": "running"},
                 ],
-                "default_timeout": 30.0,
+                "default_timeout": 120.0,
             })
             await pilot.pause()
-            check("subagent_timeout 触发部分提示",
-                  any("默认超时" in str(getattr(c, "content", "")) for c in chat.children))
+            check("timeout 更新运行中行", rows and "▶" in str(rows[1].content))
+            check("timeout 提示 Notice",
+                  any("部分结果" in str(getattr(c, "content", "")) for c in chat.children))
 
             await app._handle_event({
                 "type": "subagent_final",
                 "results": [
-                    {"index": 0, "prompt": "a", "status": "done"},
-                    {"index": 1, "prompt": "b", "status": "done"},
+                    {"index": 0, "prompt": "research A", "status": "done"},
+                    {"index": 1, "prompt": "research B", "status": "done"},
+                    {"index": 2, "prompt": "research C", "status": "error", "error": "boom"},
                 ],
             })
             await pilot.pause()
-            check("subagent_final 渲染汇总",
-                  any("🏁" in str(getattr(c, "content", "")) and "全部结束" in str(getattr(c, "content", ""))
-                      for c in chat.children))
+            check("final 更新全部行", rows and "✓" in str(rows[1].content))
+            check("final 失败行带 ✗", rows and "✗" in str(rows[2].content))
+            check("final 概览含失败", board is not None and "失败" in board.title)
+
+            # Clicking a row opens the detail screen; Esc closes it.
+            from jarvis.tui.screens import SubAgentDetailScreen
+            rows[0].post_message(SubAgentOpen(dict(rows[0].child)))
+            await pilot.pause()
+            check("点击行打开详情弹窗", isinstance(app.screen, SubAgentDetailScreen))
+            check("详情弹窗含完整 prompt", "research A" in app.screen.query_one("#subagent-meta").content)
+            check("详情弹窗含完整输出", "A 的结论" in app.screen.query_one("#subagent-output").content)
+            await pilot.press("escape")
+            await pilot.pause()
+            check("Esc 关闭详情弹窗", not isinstance(app.screen, SubAgentDetailScreen))
+
+            await app._handle_event({
+                "type": "subagent_summary",
+                "text": "[并行子任务 · 3 个 · 完成 2/3]",
+            })
+            await pilot.pause()
+            check("summary 后面板指针复位", app._subagent_board is None)
 
             # --------------------------------------------------- thinking stream
             chat = app.query_one("#chat")

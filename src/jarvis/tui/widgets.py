@@ -211,6 +211,118 @@ class Notice(Static):
         super().__init__(text, markup=False, classes=f"notice {kind}")
 
 
+# --------------------------------------------------------------- subagent board
+class SubAgentOpen(Message):
+    """A sub-agent row was clicked; ``child`` is its state dict."""
+
+    def __init__(self, child: dict[str, Any]) -> None:
+        self.child = child
+        super().__init__()
+
+
+class _SubAgentRow(Static):
+    """One clickable line inside the board: status + #index + prompt preview."""
+
+    def __init__(self, child: dict[str, Any]) -> None:
+        self.child = child
+        super().__init__(self._render_row(), markup=False, classes="subagent-row")
+
+    def _render_row(self) -> str:
+        child = self.child
+        mark = {"pending": "·", "running": "▶", "done": "✓", "error": "✗", "timeout": "⏱"}.get(
+            str(child.get("status", "pending")), "·"
+        )
+        prompt = str(child.get("prompt", ""))
+        preview = clip(prompt, 52)
+        elapsed = child.get("elapsed")
+        tail = f"  {elapsed:.1f}s" if isinstance(elapsed, (int, float)) and elapsed else ""
+        return f"  {mark} #{child.get('index', 0) + 1}  {preview}{tail}"
+
+    def refresh_row(self) -> None:
+        self.update(self._render_row())
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        self.post_message(SubAgentOpen(dict(self.child)))
+
+
+class SubAgentBoard(Collapsible):
+    """A batch of dispatched sub-agents as a collapsible, clickable list.
+
+    Collapsed it is one overview line (``▶ 并行子任务 · 3 个 · 完成 2/3``);
+    expanded it lists one row per child, and clicking a row opens a detail
+    screen with that child's prompt and full output.
+    """
+
+    def __init__(self, prompts: list[str], **kwargs: Any) -> None:
+        self._rows: dict[int, _SubAgentRow] = {}
+        self._body = Static("", markup=False, classes="board-body")
+        super().__init__(
+            self._body, title="", collapsed=True, classes="subagent-board", **kwargs
+        )
+        self.children_state: dict[int, dict[str, Any]] = {
+            index: {"index": index, "prompt": prompt, "status": "pending"}
+            for index, prompt in enumerate(prompts)
+        }
+        self._refresh_view()
+
+    # NOTE: ``_refresh_view`` again - never name a Widget method ``_render``.
+    def _refresh_view(self) -> None:
+        states = list(self.children_state.values())
+        done = sum(1 for c in states if c.get("status") == "done")
+        errored = sum(1 for c in states if c.get("status") == "error")
+        total = len(states)
+        running = sum(1 for c in states if c.get("status") in ("pending", "running"))
+        title = f"并行子任务 · {total} 个 · 完成 {done}/{total}"
+        if errored:
+            title += f" · {errored} 失败"
+        if running and done + errored:
+            title += " · 进行中"
+        self.title = title
+        self.set_class(errored > 0 and running == 0, "bad")
+
+        body_lines = [
+            "点击一行查看该子任务的完整输出；Esc 关闭详情。",
+        ]
+        self._body.update("\n".join(body_lines))
+
+    def on_mount(self) -> None:
+        self.mount_rows()
+
+    def mount_rows(self) -> None:
+        """(Re)create the per-child rows inside the Contents area."""
+
+        from textual.widgets import Collapsible as _C  # Contents class
+
+        contents = self.query_one(_C.Contents)
+        for index in sorted(self.children_state):
+            row = _SubAgentRow(self.children_state[index])
+            self._rows[index] = row
+            contents.mount(row)
+
+    def update_child(self, data: dict[str, Any]) -> None:
+        """Merge one child's state (from subagent_done/timeout/final events)."""
+
+        index = int(data.get("index", -1))
+        if index not in self.children_state:
+            return
+        state = self.children_state[index]
+        for key in ("status", "output", "tool_count", "elapsed", "error"):
+            if key in data and data[key] is not None:
+                state[key] = data[key]
+        row = self._rows.get(index)
+        if row is not None:
+            row.child = state
+            row.refresh_row()
+        self._refresh_view()
+
+    def update_all(self, results: list[dict[str, Any]]) -> None:
+        """Merge a full snapshot (from subagent_timeout / subagent_final)."""
+
+        for data in results:
+            self.update_child(data)
+
+
 class PlanView(Static):
     """Live view of a plan and its step statuses.
 

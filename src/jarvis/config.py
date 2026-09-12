@@ -203,8 +203,8 @@ class SubAgentConfig:
     the user gets something to read while the slowest task is still cooking.
     """
 
-    default_timeout: float = 30.0   # seconds before partial output (UI only)
-    max_runtime: float = 600.0      # absolute cap per sub-agent (model call + tools)
+    default_timeout: float = 120.0  # seconds before partial output (UI only)
+    max_runtime: float = 900.0      # absolute cap per sub-agent (model call + tools)
     max_concurrent: int = 4         # asyncio semaphore; >=1
     max_per_call: int = 8           # max prompts in one delegate_subagents call
 
@@ -687,8 +687,8 @@ def _parse(raw: dict) -> Config:
     )
     sub_raw = raw.get("subagents") or {}
     subagents = SubAgentConfig(
-        default_timeout=float(sub_raw.get("default_timeout", 30.0)),
-        max_runtime=float(sub_raw.get("max_runtime", 600.0)),
+        default_timeout=float(sub_raw.get("default_timeout", 120.0)),
+        max_runtime=float(sub_raw.get("max_runtime", 900.0)),
         max_concurrent=max(1, int(sub_raw.get("max_concurrent", 4))),
         max_per_call=max(1, int(sub_raw.get("max_per_call", 8))),
     )

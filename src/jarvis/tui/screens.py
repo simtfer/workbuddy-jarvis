@@ -119,6 +119,64 @@ class ModelPickerScreen(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+class SubAgentDetailScreen(ModalScreen[None]):
+    """Full view of one dispatched sub-agent: prompt, status, complete output.
+
+    Opened by clicking a row in the sub-agent board; Esc (or Enter) closes it.
+    """
+
+    BINDINGS = [
+        ("escape", "close", "关闭"),
+        ("enter", "close", "关闭"),
+        ("space", "close", "关闭"),
+    ]
+
+    CSS = """
+    SubAgentDetailScreen { align: center middle; }
+    #subagent-box {
+        width: 92%; max-width: 120; height: auto; max-height: 80%;
+        border: round $accent; background: $surface; padding: 1 2;
+    }
+    #subagent-head { color: $accent; text-style: bold; margin-bottom: 1; }
+    #subagent-meta { color: $text-muted; margin-bottom: 1; }
+    #subagent-output {
+        height: auto; max-height: 28;
+        border-top: solid $panel; padding: 1 1 0 1;
+        color: $text;
+    }
+    #subagent-hint { color: $text-muted; margin-top: 1; }
+    """
+
+    def __init__(self, child: dict) -> None:
+        super().__init__()
+        self.child = child
+
+    def compose(self) -> ComposeResult:
+        child = self.child
+        status = str(child.get("status", "?"))
+        elapsed = child.get("elapsed")
+        tools = child.get("tool_count", 0)
+        meta_bits = [f"状态 {status}"]
+        if isinstance(elapsed, (int, float)):
+            meta_bits.append(f"用时 {elapsed:.1f}s")
+        if tools:
+            meta_bits.append(f"工具 {tools} 次")
+        error = str(child.get("error") or "").strip()
+        if error:
+            meta_bits.append(f"错误 {error}")
+        output = str(child.get("output") or "").strip() or "（尚无输出）"
+        with Container(id="subagent-box"):
+            yield Static(
+                f"子任务 #{child.get('index', 0) + 1}", id="subagent-head"
+            )
+            yield Static(str(child.get("prompt", "")), id="subagent-meta")
+            yield Static(output, id="subagent-output")
+            yield Static("Esc 关闭", id="subagent-hint")
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
 class HelpScreen(ModalScreen[None]):
     """Keyboard and slash-command cheatsheet."""
 
@@ -210,7 +268,11 @@ JARVIS-Win · Phase 4
 多任务与并发
   主 Agent 会在用户的问题天然可拆成 N 个互不依赖子任务时，自动调用
   delegate_subagents 并行派给子 Agent（每个独立对话、共享工具与数据库）。
-  超时（默认 30s）后先把已完成的部分输出，剩下的继续跑完再追加最终汇总。
+  聊天流里会出现「并行子任务」折叠面板：展开列出每个子任务的状态行，
+  点击一行进入详情页看该子任务的完整输出，Esc 返回。
+  部分超时（默认 120s）后先输出已完成的部分，剩下的继续跑完再追加最终汇总。
+  配置在 config.toml 的 [subagents]：default_timeout / max_runtime /
+  max_concurrent / max_per_call。
 
 思考过程
   推理模型（DeepSeek-R1 等）输出的思考流会显示在回答上方的「思考过程」

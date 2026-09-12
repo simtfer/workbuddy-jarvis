@@ -27,7 +27,7 @@ from ..tools import build_registry, sysinfo
 from ..tools import clipboard as clipboard_mod
 from ..tools import notify as notify_mod
 from ..tools import procman, web
-from .screens import ConfirmScreen, HelpScreen, ModelPickerScreen
+from .screens import ConfirmScreen, HelpScreen, ModelPickerScreen, SubAgentDetailScreen
 from .widgets import (
     AssistantMessage,
     Banner,
@@ -38,6 +38,8 @@ from .widgets import (
     MENU_WIDTH,
     Notice,
     PlanView,
+    SubAgentBoard,
+    SubAgentOpen,
     ThinkingView,
     ToolCallView,
     UserMessage,
@@ -130,6 +132,14 @@ class JarvisApp(App[None]):
     .tool-call CollapsibleTitle { color: $warning; background: transparent; padding: 0 1; }
     .tool-call.bad CollapsibleTitle { color: $error; }
     .tool-body { color: $text-muted; padding: 0 0 1 0; }
+    /* Sub-agent board: same flush-collapsed rule as the other blocks. */
+    .subagent-board { margin-top: 1; background: transparent; border-top: none; }
+    .subagent-board.-collapsed { margin-top: 0; padding-bottom: 0; }
+    .subagent-board CollapsibleTitle { color: $accent; background: transparent; padding: 0 1; }
+    .subagent-board.bad CollapsibleTitle { color: $error; }
+    .board-body { color: $text-muted; padding: 0 0 0 0; }
+    .subagent-row { padding: 0 1; color: $text; }
+    .subagent-row:hover { background: $panel 40%; }
     .notice { color: $text-muted; padding: 0 1; margin-top: 1; }
     .notice.bad { color: $error; }
     .notice.warn { color: $warning; }
@@ -184,6 +194,7 @@ class JarvisApp(App[None]):
         self._stream_widget: AssistantMessage | None = None
         self._thinking_widget: ThinkingView | None = None
         self._tool_view: ToolCallView | None = None
+        self._subagent_board: SubAgentBoard | None = None
         self._plan_view: PlanView | None = None
         self._busy = False
         self._panel_busy = False
@@ -363,6 +374,7 @@ class JarvisApp(App[None]):
         self._stream_widget = None
         self._thinking_widget = None
         self._tool_view = None
+        self._subagent_board = None
         started = time.monotonic()
         try:
             async for event in factory():
@@ -377,6 +389,7 @@ class JarvisApp(App[None]):
             self._busy = False
             self._stream_widget = None
             self._tool_view = None
+            self._subagent_board = None
             if self._thinking_widget is not None:
                 self._thinking_widget.finish()
                 self._thinking_widget = None
@@ -459,52 +472,29 @@ class JarvisApp(App[None]):
             )
         elif kind == "subagent_start":
             prompts = event.get("prompts") or []
-            preview = " · ".join(p[:30] for p in prompts[:5])
-            if len(prompts) > 5:
-                preview += f" … 等 {len(prompts)} 个"
-            await self._append(
-                Notice(f"→ 派发了 {event['count']} 个子任务：{preview}", "info")
-            )
+            board = SubAgentBoard(prompts)
+            self._subagent_board = board
+            await self._append(board)
         elif kind == "subagent_done":
-            status = event.get("status", "done")
-            mark = {"done": "✓", "error": "✗", "timeout": "⏱"}.get(status, "·")
-            tools = event.get("tool_count", 0)
-            elapsed = event.get("elapsed", 0.0)
-            await self._append(
-                Notice(
-                    f"{mark} 子任务 #{event['index'] + 1} {status} · "
-                    f"{tools} 工具 · {elapsed:.1f}s",
-                    "info" if status == "done" else ("warn" if status == "timeout" else "bad"),
-                )
-            )
+            if self._subagent_board is not None:
+                self._subagent_board.update_child(event)
         elif kind == "subagent_timeout":
-            results = event.get("results") or []
-            finished = sum(1 for r in results if r["status"] == "done")
-            running = [r["index"] + 1 for r in results if r["status"] not in ("done", "error")]
-            timeout = event.get("default_timeout", 0)
+            if self._subagent_board is not None:
+                self._subagent_board.update_all(event.get("results") or [])
             await self._append(
                 Notice(
-                    f"⏱ 默认超时 {timeout:.0f}s：已完成 {finished}/{len(results)}，"
-                    f"仍在跑：{', '.join('#' + str(i) for i in running) or '无'}。"
-                    f"  先把已有结果继续推进，剩下的完成后会自动追加最终汇总。",
+                    f"⏱ {event.get('default_timeout', 0):.0f}s 未跑完：已先输出部分结果，"
+                    f"剩余子任务继续，完成后自动追加最终汇总。",
                     "warn",
                 )
             )
         elif kind == "subagent_final":
-            results = event.get("results") or []
-            finished = sum(1 for r in results if r["status"] == "done")
-            failed = sum(1 for r in results if r["status"] == "error")
-            await self._append(
-                Notice(
-                    f"🏁 子任务全部结束：{finished} 成功"
-                    + (f" · {failed} 失败" if failed else "")
-                    + "。",
-                    "info" if not failed else "warn",
-                )
-            )
+            if self._subagent_board is not None:
+                self._subagent_board.update_all(event.get("results") or [])
         elif kind == "subagent_summary":
-            # Rendered as part of the tool_result that follows.
-            pass
+            # Rendered as part of the tool_result that follows; the board
+            # above already holds the per-child detail views.
+            self._subagent_board = None
         elif kind == "error":
             self._stream_widget = None
             self._close_thinking()
@@ -1289,6 +1279,7 @@ class JarvisApp(App[None]):
         self._stream_widget = None
         self._thinking_widget = None
         self._tool_view = None
+        self._subagent_board = None
 
     def action_toggle_menu(self) -> None:
         """Collapse / expand the left command menu (Ctrl+B)."""
@@ -1324,6 +1315,13 @@ class JarvisApp(App[None]):
         event.stop()
         self._collapse_menu()
         self._focus_prompt()
+
+    @on(SubAgentOpen)
+    def _on_subagent_open(self, event: SubAgentOpen) -> None:
+        """A board row was clicked: show that child's full transcript."""
+
+        event.stop()
+        self.push_screen(SubAgentDetailScreen(event.child))
 
     def _side_hidden(self) -> bool:
         try:
